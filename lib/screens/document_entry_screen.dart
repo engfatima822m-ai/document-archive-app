@@ -34,11 +34,13 @@ class _DocumentEntryScreenState extends State<DocumentEntryScreen> {
   List<String> _scannerNames = [];
   int? _selectedScannerIndex;
   List<String> _scannedImagePaths = [];
+  int _currentPreviewIndex = 0;
 
   bool _isLoading = false;
   bool _isScanning = false;
   bool _isLoadingScanners = false;
   bool _isSearching = false;
+  bool _isImportingTempImages = false;
 
   DocumentModel? _savedDocument;
   DocumentModel? _searchedDocument;
@@ -59,11 +61,14 @@ class _DocumentEntryScreenState extends State<DocumentEntryScreen> {
     return 'http://localhost/document_api';
   }
 
+  bool get _hasMultiplePreviewImages => _scannedImagePaths.length > 1;
+
   @override
   void initState() {
     super.initState();
     _loadScanners();
     _ensureArchiveRootExists();
+    _ensureTempFolderExists();
   }
 
   Future<void> _ensureArchiveRootExists() async {
@@ -75,6 +80,86 @@ class _DocumentEntryScreenState extends State<DocumentEntryScreen> {
     } catch (e) {
       _showMessage('تعذر إنشاء مجلد الأرشفة الرئيسي: $e', isError: true);
     }
+  }
+
+  Future<void> _ensureTempFolderExists() async {
+    try {
+      final tempDir = Directory(_tempFolderPath);
+      if (!await tempDir.exists()) {
+        await tempDir.create(recursive: true);
+      }
+    } catch (e) {
+      _showMessage('تعذر إنشاء مجلد السحب المؤقت: $e', isError: true);
+    }
+  }
+
+  bool _isImageFile(String path) {
+    final lower = path.toLowerCase();
+    return lower.endsWith('.jpg') ||
+        lower.endsWith('.jpeg') ||
+        lower.endsWith('.png') ||
+        lower.endsWith('.bmp') ||
+        lower.endsWith('.tif') ||
+        lower.endsWith('.tiff');
+  }
+
+  Future<List<String>> _getScannedFilesFromTempFolder() async {
+    final directory = Directory(_tempFolderPath);
+
+    if (!await directory.exists()) {
+      return [];
+    }
+
+    final files = directory
+        .listSync()
+        .whereType<File>()
+        .where((file) => _isImageFile(file.path))
+        .map((file) => file.path)
+        .toList();
+
+    files.sort((a, b) => a.toLowerCase().compareTo(b.toLowerCase()));
+    return files;
+  }
+
+  Future<void> _clearTempFolder() async {
+    final dir = Directory(_tempFolderPath);
+
+    if (!await dir.exists()) return;
+
+    final files = dir.listSync();
+    for (final entity in files) {
+      if (entity is File) {
+        try {
+          await entity.delete();
+        } catch (_) {}
+      }
+    }
+  }
+
+  void _setPreviewImages(List<String> images) {
+    setState(() {
+      _scannedImagePaths = images;
+      _currentPreviewIndex = 0;
+    });
+  }
+
+  void _goToNextPreviewImage() {
+    if (_scannedImagePaths.isEmpty || !_hasMultiplePreviewImages) return;
+
+    setState(() {
+      _currentPreviewIndex =
+          (_currentPreviewIndex + 1) % _scannedImagePaths.length;
+    });
+  }
+
+  void _goToPreviousPreviewImage() {
+    if (_scannedImagePaths.isEmpty || !_hasMultiplePreviewImages) return;
+
+    setState(() {
+      _currentPreviewIndex =
+          (_currentPreviewIndex - 1 + _scannedImagePaths.length) %
+              _scannedImagePaths.length;
+    });
   }
 
   Future<void> _loadScanners() async {
@@ -99,98 +184,141 @@ class _DocumentEntryScreenState extends State<DocumentEntryScreen> {
     }
   }
 
-  Future<void> _loadScannedImagesFromFolder() async {
+  Future<void> _loadScannedImagesFromFolder({bool showMessage = true}) async {
     setState(() {
-      _isScanning = true;
+      _isImportingTempImages = true;
     });
 
     try {
-      final directory = Directory(_tempFolderPath);
-
-      if (!await directory.exists()) {
-        _showMessage('مجلد السحب غير موجود', isError: true);
-        return;
-      }
-
-      final files = directory
-          .listSync()
-          .whereType<File>()
-          .where((file) {
-            final path = file.path.toLowerCase();
-            return path.endsWith('.jpg') ||
-                path.endsWith('.jpeg') ||
-                path.endsWith('.png');
-          })
-          .map((file) => file.path)
-          .toList();
+      final files = await _getScannedFilesFromTempFolder();
 
       if (files.isEmpty) {
-        _showMessage('لا توجد صور داخل مجلد السحب', isError: true);
+        if (showMessage) {
+          _showMessage(
+            'لا توجد صور داخل C:\\ScannedTemp',
+            isError: true,
+          );
+        }
         return;
       }
 
-      files.sort();
+      _setPreviewImages(files);
 
-      setState(() {
-        _scannedImagePaths = files;
-      });
-
-      _showMessage('تم تحميل ${files.length} صورة من مجلد السحب');
+      if (showMessage) {
+        _showMessage('تم تحميل ${files.length} صورة من مجلد السحب');
+      }
     } catch (e) {
       _showMessage('حدث خطأ أثناء تحميل الصور: $e', isError: true);
     } finally {
       if (mounted) {
         setState(() {
-          _isScanning = false;
+          _isImportingTempImages = false;
         });
       }
     }
   }
 
-  Future<void> _startScanAndImport() async {
-    try {
-      final dir = Directory(_tempFolderPath);
+  Future<bool> _waitForScannedImages({
+    int maxAttempts = 20,
+    Duration delay = const Duration(seconds: 1),
+  }) async {
+    for (int i = 0; i < maxAttempts; i++) {
+      final files = await _getScannedFilesFromTempFolder();
+      if (files.isNotEmpty) {
+        if (!mounted) return true;
+        _setPreviewImages(files);
+        return true;
+      }
+      await Future.delayed(delay);
+    }
+    return false;
+  }
 
-      if (await dir.exists()) {
-        final files = dir.listSync();
-        for (final file in files) {
-          if (file is File) {
-            await file.delete();
-          }
-        }
+
+Future<void> _startScanAndImport() async {
+  setState(() {
+    _isScanning = true;
+    _scannedImagePaths = [];
+    _currentPreviewIndex = 0;
+  });
+
+  try {
+    await _ensureTempFolderExists();
+
+    // ✨ مهم: حذف الصور القديمة قبل السحب الجديد
+    await _clearTempFolder();
+
+    final scannerExe = File(_scannerExePath);
+    if (!await scannerExe.exists()) {
+      _showMessage(
+        'تعذر العثور على برنامج السكانر في المسار المحدد',
+        isError: true,
+      );
+      return;
+    }
+
+    await Process.start(
+      _scannerExePath,
+      [],
+      mode: ProcessStartMode.detached,
+    );
+
+    if (!mounted) return;
+
+    await showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (_) => AlertDialog(
+        title: const Text('تنفيذ السحب'),
+        content: const Text(
+          'تم فتح برنامج Canon.\n'
+          'اسحبي الأوراق من برنامج السكانر، وبعد اكتمال السحب اضغطي "تم السحب".',
+          textAlign: TextAlign.right,
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('تم السحب'),
+          ),
+        ],
+      ),
+    );
+
+    if (!mounted) return;
+
+    bool loaded = false;
+
+    for (int i = 0; i < 10; i++) {
+      final files = await _getScannedFilesFromTempFolder();
+
+      if (files.isNotEmpty) {
+        _setPreviewImages(files);
+        loaded = true;
+        break;
       }
 
-      await Process.start(
-        _scannerExePath,
-        [],
-        mode: ProcessStartMode.detached,
+      await Future.delayed(const Duration(seconds: 1));
+    }
+
+    if (!loaded) {
+      _showMessage(
+        'لم يتم العثور على صور جديدة بعد السحب',
+        isError: true,
       );
+      return;
+    }
 
-      if (!mounted) return;
-
-      await showDialog(
-        context: context,
-        builder: (_) => AlertDialog(
-          title: const Text('تنفيذ السحب'),
-          content: const Text(
-            'تم فتح برنامج Canon.\nاسحبي المستند من البرنامج، ثم ارجعي واضغطي موافق.',
-            textAlign: TextAlign.right,
-          ),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.pop(context),
-              child: const Text('موافق'),
-            ),
-          ],
-        ),
-      );
-
-      await Future.delayed(const Duration(seconds: 2));
-      await _loadScannedImagesFromFolder();
-    } catch (e) {
-      _showMessage('حدث خطأ أثناء تشغيل السكانر: $e', isError: true);
+    _showMessage('تم تحميل ${_scannedImagePaths.length} صورة بنجاح');
+  } catch (e) {
+    _showMessage('حدث خطأ أثناء تشغيل السكانر: $e', isError: true);
+  } finally {
+    if (mounted) {
+      setState(() {
+        _isScanning = false;
+      });
     }
   }
+}
 
   Future<void> _pickDate() async {
     final now = DateTime.now();
@@ -373,23 +501,31 @@ class _DocumentEntryScreenState extends State<DocumentEntryScreen> {
       _searchController.clear();
       _searchedDocument = null;
       _searchResults = [];
+      _scannedImagePaths = [];
+      _currentPreviewIndex = 0;
     });
   }
 
   void _fillFormFromDocument(DocumentModel document) {
+    final existingImages =
+        document.imagePaths.where((path) => File(path).existsSync()).toList();
+
     setState(() {
       _documentNumberController.text = document.documentNumber;
       _documentDateController.text = document.documentDate;
       _documentTitleController.text = document.documentTitle;
       _notesController.text = document.notes;
+      _scannedImagePaths = existingImages;
+      _currentPreviewIndex = 0;
     });
   }
 
   void _clearScannedImages() {
     setState(() {
       _scannedImagePaths = [];
+      _currentPreviewIndex = 0;
     });
-    _showMessage('تم مسح الصور المسحوبة');
+    _showMessage('تم مسح الصور المعروضة');
   }
 
   Future<String> _createDocumentFolder(String documentNumber) async {
@@ -403,110 +539,120 @@ class _DocumentEntryScreenState extends State<DocumentEntryScreen> {
     return folderPath;
   }
 
-  Future<List<String>> _moveScannedFilesToDocumentFolder({
-    required List<String> scannedFiles,
-    required String targetFolderPath,
-  }) async {
-    final List<String> movedPaths = [];
+ Future<List<String>> _moveScannedFilesToDocumentFolder({
+  required List<String> scannedFiles,
+  required String targetFolderPath,
+}) async {
+  final List<String> movedPaths = [];
 
-    for (int i = 0; i < scannedFiles.length; i++) {
-      final oldPath = scannedFiles[i];
-      final oldFile = File(oldPath);
+  for (int i = 0; i < scannedFiles.length; i++) {
+    final oldPath = scannedFiles[i];
+    final oldFile = File(oldPath);
 
-      if (!await oldFile.exists()) continue;
+    if (!await oldFile.exists()) continue;
 
-      final extension = p.extension(oldPath).toLowerCase();
-      final newPath = p.join(targetFolderPath, '${i + 1}$extension');
+    final extension = p.extension(oldPath).toLowerCase();
+    final newPath = p.join(targetFolderPath, '${i + 1}$extension');
+    final newFile = File(newPath);
 
-      final movedFile = await oldFile.rename(newPath);
-      movedPaths.add(movedFile.path);
-    }
+    // ✨ بدل rename نستخدم copy ثم delete
+    await oldFile.copy(newPath);
+    await oldFile.delete();
 
-    return movedPaths;
+    movedPaths.add(newFile.path);
   }
 
+  return movedPaths;
+}
+
+  
   Future<void> _saveDocument() async {
-    final documentNumber = _documentNumberController.text.trim();
-    final documentDate = _documentDateController.text.trim();
-    final documentTitle = _documentTitleController.text.trim();
-    final notes = _notesController.text.trim();
+  final documentNumber = _documentNumberController.text.trim();
+  final documentDate = _documentDateController.text.trim();
+  final documentTitle = _documentTitleController.text.trim();
+  final notes = _notesController.text.trim();
 
-    if (documentNumber.isEmpty) {
-      _showMessage('يرجى إدخال رقم الملف', isError: true);
+  if (documentNumber.isEmpty) {
+    _showMessage('يرجى إدخال رقم الملف', isError: true);
+    return;
+  }
+
+  if (documentDate.isEmpty) {
+    _showMessage('يرجى اختيار تأريخ الملف', isError: true);
+    return;
+  }
+
+  if (documentTitle.isEmpty) {
+    _showMessage('يرجى إدخال اسم الملف', isError: true);
+    return;
+  }
+
+  if (_scannedImagePaths.isEmpty) {
+    _showMessage('يرجى سحب الملف أولاً من جهاز السكانر', isError: true);
+    return;
+  }
+
+  setState(() {
+    _isLoading = true;
+  });
+
+  try {
+    final existingDocument =
+        await _fetchDocumentByNumberFromApi(documentNumber);
+
+    if (existingDocument != null) {
+      _showMessage('هذا الملف موجود مسبقاً', isError: true);
       return;
     }
 
-    if (documentDate.isEmpty) {
-      _showMessage('يرجى اختيار تأريخ الملف', isError: true);
-      return;
+    final folderPath = await _createDocumentFolder(documentNumber);
+
+    final movedImages = await _moveScannedFilesToDocumentFolder(
+      scannedFiles: _scannedImagePaths,
+      targetFolderPath: folderPath,
+    );
+
+    if (movedImages.isEmpty) {
+      throw Exception('لم يتم نقل الصور إلى فولدر الملف');
     }
 
-    if (documentTitle.isEmpty) {
-      _showMessage('يرجى إدخال اسم الملف', isError: true);
-      return;
-    }
+    final document = DocumentModel(
+      id: null,
+      documentNumber: documentNumber,
+      documentDate: documentDate,
+      documentTitle: documentTitle,
+      notes: notes,
+      folderPath: folderPath,
+      imagePaths: movedImages,
+    );
 
-    if (_scannedImagePaths.isEmpty) {
-      _showMessage('يرجى سحب الملف أولاً من جهاز السكانر', isError: true);
-      return;
-    }
+    await _insertDocumentToApi(document);
 
     setState(() {
-      _isLoading = true;
+      _savedDocument = null;
+      _searchedDocument = null;
+      _searchResults = [];
+      _scannedImagePaths = [];
+      _currentPreviewIndex = 0;
     });
 
-    try {
-      final existingDocument =
-          await _fetchDocumentByNumberFromApi(documentNumber);
+    _showMessage('تم حفظ الملف في قاعدة البيانات وإنشاء الفولدر بنجاح');
 
-      if (existingDocument != null) {
-        _showMessage('هذا الملف موجود مسبقاً', isError: true);
-        return;
-      }
-
-      final folderPath = await _createDocumentFolder(documentNumber);
-
-      final movedImages = await _moveScannedFilesToDocumentFolder(
-        scannedFiles: _scannedImagePaths,
-        targetFolderPath: folderPath,
-      );
-
-      final document = DocumentModel(
-        id: null,
-        documentNumber: documentNumber,
-        documentDate: documentDate,
-        documentTitle: documentTitle,
-        notes: notes,
-        folderPath: folderPath,
-        imagePaths: movedImages,
-      );
-
-      await _insertDocumentToApi(document);
-
+    _documentNumberController.clear();
+    _documentDateController.clear();
+    _documentTitleController.clear();
+    _notesController.clear();
+    _searchController.clear();
+  } catch (e) {
+    _showMessage('حدث خطأ أثناء الحفظ: $e', isError: true);
+  } finally {
+    if (mounted) {
       setState(() {
-        _savedDocument = document;
-        _searchedDocument = document;
-        _searchResults = [document];
-        _scannedImagePaths = [];
+        _isLoading = false;
       });
-
-      _showMessage('تم حفظ الملف في قاعدة البيانات بنجاح');
-
-      _documentNumberController.clear();
-      _documentDateController.clear();
-      _documentTitleController.clear();
-      _notesController.clear();
-      _searchController.text = document.documentNumber;
-    } catch (e) {
-      _showMessage('حدث خطأ أثناء الحفظ: $e', isError: true);
-    } finally {
-      if (mounted) {
-        setState(() {
-          _isLoading = false;
-        });
-      }
     }
   }
+}
 
   void _showMessage(String message, {bool isError = false}) {
     ScaffoldMessenger.of(context).showSnackBar(
@@ -768,6 +914,9 @@ class _DocumentEntryScreenState extends State<DocumentEntryScreen> {
             itemCount: _scannedImagePaths.length,
             separatorBuilder: (_, __) => const SizedBox(width: 12),
             itemBuilder: (context, index) {
+              final imagePath = _scannedImagePaths[index];
+              final imageFile = File(imagePath);
+
               return Container(
                 width: 130,
                 decoration: BoxDecoration(
@@ -783,10 +932,17 @@ class _DocumentEntryScreenState extends State<DocumentEntryScreen> {
                 ),
                 child: ClipRRect(
                   borderRadius: BorderRadius.circular(18),
-                  child: Image.file(
-                    File(_scannedImagePaths[index]),
-                    fit: BoxFit.cover,
-                  ),
+                  child: imageFile.existsSync()
+                      ? Image.file(
+                          imageFile,
+                          fit: BoxFit.cover,
+                        )
+                      : Container(
+                          color: Colors.grey.shade200,
+                          child: const Center(
+                            child: Icon(Icons.broken_image_outlined),
+                          ),
+                        ),
                 ),
               );
             },
@@ -998,9 +1154,42 @@ class _DocumentEntryScreenState extends State<DocumentEntryScreen> {
                       )
                     : const Icon(Icons.document_scanner_outlined),
                 label: Text(
-                  _isScanning ? 'جاري الاستيراد...' : 'سحب من السكانر',
+                  _isScanning ? 'جاري انتظار الصور...' : 'سحب من السكانر',
                   style: const TextStyle(
                     fontSize: 16,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+              ),
+            ),
+            const SizedBox(height: 12),
+            SizedBox(
+              width: double.infinity,
+              height: 52,
+              child: OutlinedButton.icon(
+                onPressed: _isImportingTempImages
+                    ? null
+                    : () => _loadScannedImagesFromFolder(),
+                style: OutlinedButton.styleFrom(
+                  foregroundColor: darkColor,
+                  side: BorderSide(color: borderColor),
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(22),
+                  ),
+                ),
+                icon: _isImportingTempImages
+                    ? const SizedBox(
+                        width: 18,
+                        height: 18,
+                        child: CircularProgressIndicator(strokeWidth: 2.2),
+                      )
+                    : const Icon(Icons.folder_open_outlined),
+                label: Text(
+                  _isImportingTempImages
+                      ? 'جاري تحميل الصور...'
+                      : 'تحميل الصور من مجلد السحب',
+                  style: const TextStyle(
+                    fontSize: 15,
                     fontWeight: FontWeight.w700,
                   ),
                 ),
@@ -1200,8 +1389,8 @@ class _DocumentEntryScreenState extends State<DocumentEntryScreen> {
                           onTap: () {
                             setState(() {
                               _searchedDocument = doc;
-                              _fillFormFromDocument(doc);
                             });
+                            _fillFormFromDocument(doc);
                           },
                           child: Container(
                             padding: const EdgeInsets.all(12),
@@ -1264,132 +1453,207 @@ class _DocumentEntryScreenState extends State<DocumentEntryScreen> {
     );
   }
 
- Widget _buildSideStatsCard() {
-  return Container(
-    padding: const EdgeInsets.all(22),
-    decoration: BoxDecoration(
-      color: const Color(0xFFE7E3DB),
-      borderRadius: BorderRadius.circular(30),
-      border: Border.all(color: borderColor),
-      boxShadow: [
-        BoxShadow(
-          color: Colors.black.withOpacity(0.06),
-          blurRadius: 18,
-          offset: const Offset(0, 10),
-        ),
-      ],
-    ),
-    child: Directionality(
-      textDirection: ui.TextDirection.rtl,
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Align(
-            alignment: Alignment.topLeft,
-            child: Icon(
-              Icons.auto_awesome,
-              color: accentColor,
-              size: 32,
-            ),
+  Widget _buildPreviewNavigationButton({
+    required IconData icon,
+    required VoidCallback onTap,
+  }) {
+    return Material(
+      color: Colors.white.withOpacity(0.92),
+      borderRadius: BorderRadius.circular(14),
+      elevation: 2,
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(14),
+        child: Container(
+          width: 46,
+          height: 46,
+          decoration: BoxDecoration(
+            borderRadius: BorderRadius.circular(14),
+            border: Border.all(color: borderColor),
           ),
-          const SizedBox(height: 14),
-          Expanded(
-            child: Container(
-              width: double.infinity,
-              padding: const EdgeInsets.all(14),
-              decoration: BoxDecoration(
-                color: Colors.white.withOpacity(0.65),
-                borderRadius: BorderRadius.circular(24),
-                border: Border.all(color: borderColor),
-              ),
-              child: _scannedImagePaths.isNotEmpty
-                  ? Column(
-                      children: [
-                        Expanded(
-                          child: ClipRRect(
-                            borderRadius: BorderRadius.circular(20),
-                            child: Image.file(
-                              File(_scannedImagePaths.first),
-                              fit: BoxFit.contain,
-                              width: double.infinity,
-                            ),
-                          ),
-                        ),
-                        const SizedBox(height: 14),
-                        Container(
-                          width: double.infinity,
-                          padding: const EdgeInsets.symmetric(
-                            horizontal: 16,
-                            vertical: 12,
-                          ),
-                          decoration: BoxDecoration(
-                            color: accentColor.withOpacity(0.16),
-                            borderRadius: BorderRadius.circular(18),
-                            border: Border.all(
-                              color: accentColor.withOpacity(0.28),
-                            ),
-                          ),
-                          child: Row(
-                            mainAxisAlignment: MainAxisAlignment.center,
-                            children: [
-                              Icon(
-                                Icons.collections_outlined,
-                                color: accentColor,
-                                size: 22,
-                              ),
-                              const SizedBox(width: 10),
-                              Text(
-                                'عدد الصفحات المسحوبة: ${_scannedImagePaths.length}',
-                                style: TextStyle(
-                                  color: darkColor,
-                                  fontSize: 15,
-                                  fontWeight: FontWeight.w700,
-                                ),
-                              ),
-                            ],
-                          ),
-                        ),
-                      ],
-                    )
-                  : Center(
-                      child: Column(
-                        mainAxisAlignment: MainAxisAlignment.center,
-                        children: [
-                          Icon(
-                            Icons.image_outlined,
-                            size: 72,
-                            color: accentColor.withOpacity(0.75),
-                          ),
-                          const SizedBox(height: 14),
-                          Text(
-                            'ستظهر أول صورة من الملف هنا بعد السحب من السكانر',
-                            textAlign: TextAlign.center,
-                            style: TextStyle(
-                              color: softTextColor,
-                              fontSize: 16,
-                              fontWeight: FontWeight.w600,
-                              height: 1.6,
-                            ),
-                          ),
-                          const SizedBox(height: 10),
-                          Text(
-                            'وسيظهر أسفلها عدد الصفحات المسحوبة',
-                            textAlign: TextAlign.center,
-                            style: TextStyle(
-                              color: softTextColor,
-                              fontSize: 14,
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-            ),
+          child: Icon(
+            icon,
+            color: darkColor,
+            size: 24,
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildSideStatsCard() {
+    final hasImages = _scannedImagePaths.isNotEmpty;
+    final currentImagePath = hasImages
+        ? _scannedImagePaths[_currentPreviewIndex.clamp(
+            0,
+            _scannedImagePaths.length - 1,
+          )]
+        : null;
+
+    return Container(
+      padding: const EdgeInsets.all(22),
+      decoration: BoxDecoration(
+        color: const Color(0xFFE7E3DB),
+        borderRadius: BorderRadius.circular(30),
+        border: Border.all(color: borderColor),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withOpacity(0.06),
+            blurRadius: 18,
+            offset: const Offset(0, 10),
           ),
         ],
       ),
-    ),
-  );
-}
+      child: Directionality(
+        textDirection: ui.TextDirection.rtl,
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Align(
+              alignment: Alignment.topLeft,
+              child: Icon(
+                Icons.auto_awesome,
+                color: accentColor,
+                size: 32,
+              ),
+            ),
+            const SizedBox(height: 14),
+            Expanded(
+              child: Container(
+                width: double.infinity,
+                padding: const EdgeInsets.all(14),
+                decoration: BoxDecoration(
+                  color: Colors.white.withOpacity(0.65),
+                  borderRadius: BorderRadius.circular(24),
+                  border: Border.all(color: borderColor),
+                ),
+                child: hasImages
+                    ? Column(
+                        children: [
+                          Expanded(
+                            child: Stack(
+                              alignment: Alignment.center,
+                              children: [
+                                ClipRRect(
+                                  borderRadius: BorderRadius.circular(20),
+                                  child: File(currentImagePath!).existsSync()
+                                      ? Image.file(
+                                          File(currentImagePath),
+                                          fit: BoxFit.contain,
+                                          width: double.infinity,
+                                          height: double.infinity,
+                                        )
+                                      : Container(
+                                          width: double.infinity,
+                                          height: double.infinity,
+                                          color: Colors.grey.shade200,
+                                          child: const Center(
+                                            child: Icon(
+                                              Icons.broken_image_outlined,
+                                              size: 48,
+                                            ),
+                                          ),
+                                        ),
+                                ),
+                                if (_hasMultiplePreviewImages)
+                                  Positioned(
+                                    right: 8,
+                                    child: _buildPreviewNavigationButton(
+                                      icon: Icons.chevron_right_rounded,
+                                      onTap: _goToPreviousPreviewImage,
+                                    ),
+                                  ),
+                                if (_hasMultiplePreviewImages)
+                                  Positioned(
+                                    left: 8,
+                                    child: _buildPreviewNavigationButton(
+                                      icon: Icons.chevron_left_rounded,
+                                      onTap: _goToNextPreviewImage,
+                                    ),
+                                  ),
+                              ],
+                            ),
+                          ),
+                          const SizedBox(height: 14),
+                          Container(
+                            width: double.infinity,
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 16,
+                              vertical: 12,
+                            ),
+                            decoration: BoxDecoration(
+                              color: accentColor.withOpacity(0.16),
+                              borderRadius: BorderRadius.circular(18),
+                              border: Border.all(
+                                color: accentColor.withOpacity(0.28),
+                              ),
+                            ),
+                            child: Column(
+                              children: [
+                                Text(
+                                  'عدد الصفحات المسحوبة: ${_scannedImagePaths.length}',
+                                  style: TextStyle(
+                                    color: darkColor,
+                                    fontSize: 15,
+                                    fontWeight: FontWeight.w700,
+                                  ),
+                                ),
+                                if (_hasMultiplePreviewImages) ...[
+                                  const SizedBox(height: 6),
+                                  Text(
+                                    'الصفحة ${_currentPreviewIndex + 1} من ${_scannedImagePaths.length}',
+                                    style: TextStyle(
+                                      color: softTextColor,
+                                      fontSize: 13,
+                                      fontWeight: FontWeight.w600,
+                                    ),
+                                  ),
+                                ],
+                              ],
+                            ),
+                          ),
+                        ],
+                      )
+                    : Center(
+                        child: Column(
+                          mainAxisAlignment: MainAxisAlignment.center,
+                          children: [
+                            Icon(
+                              Icons.image_outlined,
+                              size: 72,
+                              color: accentColor.withOpacity(0.75),
+                            ),
+                            const SizedBox(height: 14),
+                            Text(
+                              'ستظهر أول صورة من الملف هنا بعد السحب من السكانر',
+                              textAlign: TextAlign.center,
+                              style: TextStyle(
+                                color: softTextColor,
+                                fontSize: 16,
+                                fontWeight: FontWeight.w600,
+                                height: 1.6,
+                              ),
+                            ),
+                            const SizedBox(height: 10),
+                            Text(
+                              'وسيظهر أسفلها عدد الصفحات المسحوبة',
+                              textAlign: TextAlign.center,
+                              style: TextStyle(
+                                color: softTextColor,
+                                fontSize: 14,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
   Widget _buildDarkTile(String title, String subtitle) {
     return Container(
       padding: const EdgeInsets.all(14),
