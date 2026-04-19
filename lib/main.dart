@@ -1,6 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_localizations/flutter_localizations.dart';
-import 'screens/document_entry_screen.dart';
+import 'screens/login_screen.dart';
 
 void main() {
   runApp(const DocumentArchiveApp());
@@ -27,7 +27,9 @@ class DocumentArchiveApp extends StatelessWidget {
       theme: ThemeData(
         useMaterial3: true,
       ),
-      home: const DocumentEntryScreen(),
+
+      // 🔥 هنا التغيير
+      home: const LoginScreen(),
     );
   }
 }
