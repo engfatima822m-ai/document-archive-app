@@ -1,10 +1,14 @@
 import 'dart:convert';
 import 'dart:io';
+import 'dart:typed_data';
 import 'dart:ui' as ui;
 
 import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
 import 'package:path/path.dart' as p;
+import 'package:pdf/pdf.dart';
+import 'package:pdf/widgets.dart' as pw;
+import 'package:printing/printing.dart';
 
 import '../models/document_model.dart';
 import '../services/scanner_service.dart';
@@ -41,6 +45,7 @@ class _DocumentEntryScreenState extends State<DocumentEntryScreen> {
   bool _isLoadingScanners = false;
   bool _isSearching = false;
   bool _isImportingTempImages = false;
+  bool _isPrinting = false;
 
   DocumentModel? _savedDocument;
   DocumentModel? _searchedDocument;
@@ -218,107 +223,88 @@ class _DocumentEntryScreenState extends State<DocumentEntryScreen> {
     }
   }
 
-  Future<bool> _waitForScannedImages({
-    int maxAttempts = 20,
-    Duration delay = const Duration(seconds: 1),
-  }) async {
-    for (int i = 0; i < maxAttempts; i++) {
-      final files = await _getScannedFilesFromTempFolder();
-      if (files.isNotEmpty) {
-        if (!mounted) return true;
-        _setPreviewImages(files);
-        return true;
+  Future<void> _startScanAndImport() async {
+    setState(() {
+      _isScanning = true;
+      _scannedImagePaths = [];
+      _currentPreviewIndex = 0;
+    });
+
+    try {
+      await _ensureTempFolderExists();
+      await _clearTempFolder();
+
+      final scannerExe = File(_scannerExePath);
+      if (!await scannerExe.exists()) {
+        _showMessage(
+          'تعذر العثور على برنامج السكانر في المسار المحدد',
+          isError: true,
+        );
+        return;
       }
-      await Future.delayed(delay);
-    }
-    return false;
-  }
 
-
-Future<void> _startScanAndImport() async {
-  setState(() {
-    _isScanning = true;
-    _scannedImagePaths = [];
-    _currentPreviewIndex = 0;
-  });
-
-  try {
-    await _ensureTempFolderExists();
-
-    // ✨ مهم: حذف الصور القديمة قبل السحب الجديد
-    await _clearTempFolder();
-
-    final scannerExe = File(_scannerExePath);
-    if (!await scannerExe.exists()) {
-      _showMessage(
-        'تعذر العثور على برنامج السكانر في المسار المحدد',
-        isError: true,
+      await Process.start(
+        _scannerExePath,
+        [],
+        mode: ProcessStartMode.detached,
       );
-      return;
-    }
 
-    await Process.start(
-      _scannerExePath,
-      [],
-      mode: ProcessStartMode.detached,
-    );
+      if (!mounted) return;
 
-    if (!mounted) return;
-
-    await showDialog(
-      context: context,
-      barrierDismissible: false,
-      builder: (_) => AlertDialog(
-        title: const Text('تنفيذ السحب'),
-        content: const Text(
-          'تم فتح برنامج Canon.\n'
-          'اسحبي الأوراق من برنامج السكانر، وبعد اكتمال السحب اضغطي "تم السحب".',
-          textAlign: TextAlign.right,
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context),
-            child: const Text('تم السحب'),
+      await showDialog(
+        context: context,
+        barrierDismissible: false,
+        builder: (_) => AlertDialog(
+          title: const Text('تنفيذ السحب'),
+          content: const Text(
+            'تم فتح برنامج Canon.\n'
+            'اسحبي الأوراق من برنامج السكانر، وبعد اكتمال السحب اضغطي "تم السحب".',
+            textAlign: TextAlign.right,
           ),
-        ],
-      ),
-    );
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context),
+              child: const Text('تم السحب'),
+            ),
+          ],
+        ),
+      );
 
-    if (!mounted) return;
+      if (!mounted) return;
 
-    bool loaded = false;
+      bool loaded = false;
 
-    for (int i = 0; i < 10; i++) {
-      final files = await _getScannedFilesFromTempFolder();
+      for (int i = 0; i < 10; i++) {
+        final files = await _getScannedFilesFromTempFolder();
 
-      if (files.isNotEmpty) {
-        _setPreviewImages(files);
-        loaded = true;
-        break;
+        if (files.isNotEmpty) {
+          _setPreviewImages(files);
+          loaded = true;
+          break;
+        }
+
+        await Future.delayed(const Duration(seconds: 1));
       }
 
-      await Future.delayed(const Duration(seconds: 1));
-    }
+      if (!loaded) {
+        _showMessage(
+          'لم يتم العثور على صور جديدة بعد السحب',
+          isError: true,
+        );
+        return;
+      }
 
-    if (!loaded) {
-      _showMessage(
-        'لم يتم العثور على صور جديدة بعد السحب',
-        isError: true,
-      );
-      return;
-    }
-
-    _showMessage('تم تحميل ${_scannedImagePaths.length} صورة بنجاح');
-  } catch (e) {
-    _showMessage('حدث خطأ أثناء تشغيل السكانر: $e', isError: true);
-  } finally {
-    if (mounted) {
-      setState(() {
-        _isScanning = false;
-      });
+      _showMessage('تم تحميل ${_scannedImagePaths.length} صورة بنجاح');
+    } catch (e) {
+      _showMessage('حدث خطأ أثناء تشغيل السكانر: $e', isError: true);
+    } finally {
+      if (mounted) {
+        setState(() {
+          _isScanning = false;
+        });
+      }
     }
   }
-}
 
   Future<void> _pickDate() async {
     final now = DateTime.now();
@@ -339,7 +325,7 @@ Future<void> _startScanAndImport() async {
               surface: cardColor,
               onSurface: darkColor,
             ),
-            dialogBackgroundColor: cardColor,
+            dialogTheme: DialogThemeData(backgroundColor: cardColor),
           ),
           child: child!,
         );
@@ -539,120 +525,177 @@ Future<void> _startScanAndImport() async {
     return folderPath;
   }
 
- Future<List<String>> _moveScannedFilesToDocumentFolder({
-  required List<String> scannedFiles,
-  required String targetFolderPath,
-}) async {
-  final List<String> movedPaths = [];
+  Future<List<String>> _moveScannedFilesToDocumentFolder({
+    required List<String> scannedFiles,
+    required String targetFolderPath,
+  }) async {
+    final List<String> movedPaths = [];
 
-  for (int i = 0; i < scannedFiles.length; i++) {
-    final oldPath = scannedFiles[i];
-    final oldFile = File(oldPath);
+    for (int i = 0; i < scannedFiles.length; i++) {
+      final oldPath = scannedFiles[i];
+      final oldFile = File(oldPath);
 
-    if (!await oldFile.exists()) continue;
+      if (!await oldFile.exists()) continue;
 
-    final extension = p.extension(oldPath).toLowerCase();
-    final newPath = p.join(targetFolderPath, '${i + 1}$extension');
-    final newFile = File(newPath);
+      final extension = p.extension(oldPath).toLowerCase();
+      final newPath = p.join(targetFolderPath, '${i + 1}$extension');
+      final newFile = File(newPath);
 
-    // ✨ بدل rename نستخدم copy ثم delete
-    await oldFile.copy(newPath);
-    await oldFile.delete();
+      await oldFile.copy(newPath);
+      await oldFile.delete();
 
-    movedPaths.add(newFile.path);
+      movedPaths.add(newFile.path);
+    }
+
+    return movedPaths;
   }
 
-  return movedPaths;
-}
-
-  
   Future<void> _saveDocument() async {
-  final documentNumber = _documentNumberController.text.trim();
-  final documentDate = _documentDateController.text.trim();
-  final documentTitle = _documentTitleController.text.trim();
-  final notes = _notesController.text.trim();
+    final documentNumber = _documentNumberController.text.trim();
+    final documentDate = _documentDateController.text.trim();
+    final documentTitle = _documentTitleController.text.trim();
+    final notes = _notesController.text.trim();
 
-  if (documentNumber.isEmpty) {
-    _showMessage('يرجى إدخال رقم الملف', isError: true);
-    return;
-  }
-
-  if (documentDate.isEmpty) {
-    _showMessage('يرجى اختيار تأريخ الملف', isError: true);
-    return;
-  }
-
-  if (documentTitle.isEmpty) {
-    _showMessage('يرجى إدخال اسم الملف', isError: true);
-    return;
-  }
-
-  if (_scannedImagePaths.isEmpty) {
-    _showMessage('يرجى سحب الملف أولاً من جهاز السكانر', isError: true);
-    return;
-  }
-
-  setState(() {
-    _isLoading = true;
-  });
-
-  try {
-    final existingDocument =
-        await _fetchDocumentByNumberFromApi(documentNumber);
-
-    if (existingDocument != null) {
-      _showMessage('هذا الملف موجود مسبقاً', isError: true);
+    if (documentNumber.isEmpty) {
+      _showMessage('يرجى إدخال رقم الملف', isError: true);
       return;
     }
 
-    final folderPath = await _createDocumentFolder(documentNumber);
-
-    final movedImages = await _moveScannedFilesToDocumentFolder(
-      scannedFiles: _scannedImagePaths,
-      targetFolderPath: folderPath,
-    );
-
-    if (movedImages.isEmpty) {
-      throw Exception('لم يتم نقل الصور إلى فولدر الملف');
+    if (documentDate.isEmpty) {
+      _showMessage('يرجى اختيار تأريخ الملف', isError: true);
+      return;
     }
 
-    final document = DocumentModel(
-      id: null,
-      documentNumber: documentNumber,
-      documentDate: documentDate,
-      documentTitle: documentTitle,
-      notes: notes,
-      folderPath: folderPath,
-      imagePaths: movedImages,
-    );
+    if (documentTitle.isEmpty) {
+      _showMessage('يرجى إدخال اسم الملف', isError: true);
+      return;
+    }
 
-    await _insertDocumentToApi(document);
+    if (_scannedImagePaths.isEmpty) {
+      _showMessage('يرجى سحب الملف أولاً من جهاز السكانر', isError: true);
+      return;
+    }
 
     setState(() {
-      _savedDocument = null;
-      _searchedDocument = null;
-      _searchResults = [];
-      _scannedImagePaths = [];
-      _currentPreviewIndex = 0;
+      _isLoading = true;
     });
 
-    _showMessage('تم حفظ الملف في قاعدة البيانات وإنشاء الفولدر بنجاح');
+    try {
+      final existingDocument =
+          await _fetchDocumentByNumberFromApi(documentNumber);
 
-    _documentNumberController.clear();
-    _documentDateController.clear();
-    _documentTitleController.clear();
-    _notesController.clear();
-    _searchController.clear();
-  } catch (e) {
-    _showMessage('حدث خطأ أثناء الحفظ: $e', isError: true);
-  } finally {
-    if (mounted) {
+      if (existingDocument != null) {
+        _showMessage('هذا الملف موجود مسبقاً', isError: true);
+        return;
+      }
+
+      final folderPath = await _createDocumentFolder(documentNumber);
+
+      final movedImages = await _moveScannedFilesToDocumentFolder(
+        scannedFiles: _scannedImagePaths,
+        targetFolderPath: folderPath,
+      );
+
+      if (movedImages.isEmpty) {
+        throw Exception('لم يتم نقل الصور إلى فولدر الملف');
+      }
+
+      final document = DocumentModel(
+        id: null,
+        documentNumber: documentNumber,
+        documentDate: documentDate,
+        documentTitle: documentTitle,
+        notes: notes,
+        folderPath: folderPath,
+        imagePaths: movedImages,
+      );
+
+      await _insertDocumentToApi(document);
+
       setState(() {
-        _isLoading = false;
+        _savedDocument = null;
+        _searchedDocument = null;
+        _searchResults = [];
+        _scannedImagePaths = [];
+        _currentPreviewIndex = 0;
       });
+
+      _showMessage('تم حفظ الملف في قاعدة البيانات وإنشاء الفولدر بنجاح');
+
+      _documentNumberController.clear();
+      _documentDateController.clear();
+      _documentTitleController.clear();
+      _notesController.clear();
+      _searchController.clear();
+    } catch (e) {
+      _showMessage('حدث خطأ أثناء الحفظ: $e', isError: true);
+    } finally {
+      if (mounted) {
+        setState(() {
+          _isLoading = false;
+        });
+      }
     }
   }
-}
+
+  Future<void> _printCurrentDocument() async {
+    final activeDocument = _searchedDocument ?? _savedDocument;
+
+    if (activeDocument == null) {
+      _showMessage('لا يوجد ملف محدد للطباعة', isError: true);
+      return;
+    }
+
+    final validImagePaths = activeDocument.imagePaths
+        .where((path) => File(path).existsSync() && _isImageFile(path))
+        .toList();
+
+    if (validImagePaths.isEmpty) {
+      _showMessage('لا توجد صور صالحة للطباعة لهذا الملف', isError: true);
+      return;
+    }
+
+    setState(() {
+      _isPrinting = true;
+    });
+
+    try {
+      final pdf = pw.Document();
+
+      for (final imagePath in validImagePaths) {
+        final Uint8List imageBytes = await File(imagePath).readAsBytes();
+        final imageProvider = pw.MemoryImage(imageBytes);
+
+        pdf.addPage(
+          pw.Page(
+            pageFormat: PdfPageFormat.a4,
+            margin: const pw.EdgeInsets.all(18),
+            build: (context) {
+              return pw.Center(
+                child: pw.Image(
+                  imageProvider,
+                  fit: pw.BoxFit.contain,
+                ),
+              );
+            },
+          ),
+        );
+      }
+
+      await Printing.layoutPdf(
+        name: 'document_${activeDocument.documentNumber}',
+        onLayout: (format) async => pdf.save(),
+      );
+    } catch (e) {
+      _showMessage('حدث خطأ أثناء الطباعة: $e', isError: true);
+    } finally {
+      if (mounted) {
+        setState(() {
+          _isPrinting = false;
+        });
+      }
+    }
+  }
 
   void _showMessage(String message, {bool isError = false}) {
     ScaffoldMessenger.of(context).showSnackBar(
@@ -673,41 +716,66 @@ Future<void> _startScanAndImport() async {
     bool readOnly = false,
     VoidCallback? onTap,
   }) {
+    final bool isMultiline = maxLines > 1;
+
     return Container(
       decoration: BoxDecoration(
-        color: Colors.white.withOpacity(0.65),
-        borderRadius: BorderRadius.circular(22),
+        color: Colors.white.withOpacity(0.72),
+        borderRadius: BorderRadius.circular(12),
         border: Border.all(color: borderColor),
         boxShadow: [
           BoxShadow(
-            color: Colors.black.withOpacity(0.04),
-            blurRadius: 14,
-            offset: const Offset(0, 4),
+            color: Colors.black.withOpacity(0.02),
+            blurRadius: 5,
+            offset: const Offset(0, 1),
           ),
         ],
       ),
       child: TextField(
         controller: controller,
         maxLines: maxLines,
+        minLines: isMultiline ? maxLines : 1,
         readOnly: readOnly,
         onTap: onTap,
         textAlign: TextAlign.right,
+        style: TextStyle(
+          fontSize: 12.4,
+          color: darkColor,
+          fontWeight: FontWeight.w600,
+        ),
         decoration: InputDecoration(
           hintText: hint,
+          hintStyle: TextStyle(
+            color: softTextColor.withOpacity(0.7),
+            fontSize: 11.4,
+          ),
           labelText: label,
+          labelStyle: TextStyle(
+            color: softTextColor,
+            fontSize: 11.4,
+            fontWeight: FontWeight.w600,
+          ),
           alignLabelWithHint: true,
-          prefixIcon: Icon(icon, color: accentColor),
+          prefixIcon: Icon(
+            icon,
+            color: accentColor,
+            size: 18,
+          ),
+          contentPadding: EdgeInsets.symmetric(
+            horizontal: 10,
+            vertical: isMultiline ? 8 : 6,
+          ),
           border: OutlineInputBorder(
-            borderRadius: BorderRadius.circular(22),
+            borderRadius: BorderRadius.circular(12),
             borderSide: BorderSide.none,
           ),
           enabledBorder: OutlineInputBorder(
-            borderRadius: BorderRadius.circular(22),
+            borderRadius: BorderRadius.circular(12),
             borderSide: BorderSide(color: borderColor),
           ),
           focusedBorder: OutlineInputBorder(
-            borderRadius: BorderRadius.circular(22),
-            borderSide: BorderSide(color: accentColor, width: 1.5),
+            borderRadius: BorderRadius.circular(12),
+            borderSide: BorderSide(color: accentColor, width: 1.1),
           ),
           filled: true,
           fillColor: Colors.transparent,
@@ -716,97 +784,116 @@ Future<void> _startScanAndImport() async {
     );
   }
 
-  Widget _buildTopHeader() {
-    return Container(
-      width: double.infinity,
-      padding: const EdgeInsets.symmetric(horizontal: 28, vertical: 28),
-      decoration: BoxDecoration(
-        borderRadius: BorderRadius.circular(32),
-        gradient: LinearGradient(
-          colors: [
-            Colors.white.withOpacity(0.78),
-            cardColor,
-          ],
-          begin: Alignment.topRight,
-          end: Alignment.bottomLeft,
-        ),
-        boxShadow: [
-          BoxShadow(
-            color: Colors.black.withOpacity(0.06),
-            blurRadius: 18,
-            offset: const Offset(0, 8),
-          ),
+  Widget _buildSectionTitle(String title, {IconData? icon}) {
+    return Row(
+      children: [
+        if (icon != null) ...[
+          Icon(icon, color: accentColor, size: 18),
+          const SizedBox(width: 6),
         ],
-        border: Border.all(color: borderColor),
-      ),
-      child: Directionality(
-        textDirection: ui.TextDirection.rtl,
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text(
-              'شركة توزيع المنتجات النفطية/فرع البصرة',
-              style: TextStyle(
-                fontSize: 30,
-                fontWeight: FontWeight.w800,
-                color: darkColor,
-              ),
-            ),
-            const SizedBox(height: 10),
-            Text(
-              'القسم الاداري/شعبة الموارد البشرية/ وحدة العقوبات',
-              style: TextStyle(
-                fontSize: 14,
-                color: softTextColor,
-                height: 1.6,
-              ),
-            ),
-            const SizedBox(height: 18),
-            _buildBadge('أرشفة الملفات'),
-          ],
+        Text(
+          title,
+          style: TextStyle(
+            fontSize: 16,
+            fontWeight: FontWeight.w800,
+            color: darkColor,
+          ),
         ),
-      ),
+      ],
     );
   }
 
-  Widget _buildBadge(String text) {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
-      decoration: BoxDecoration(
-        color: accentColor.withOpacity(0.18),
-        borderRadius: BorderRadius.circular(30),
-        border: Border.all(color: accentColor.withOpacity(0.35)),
-      ),
-      child: Text(
-        text,
-        style: TextStyle(
-          color: darkColor,
-          fontWeight: FontWeight.w600,
+ Widget _buildTopHeaderCompact() {
+  return Container(
+    width: double.infinity,
+    padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+    decoration: BoxDecoration(
+      color: cardColor,
+      borderRadius: BorderRadius.circular(20),
+      border: Border.all(color: borderColor),
+      boxShadow: [
+        BoxShadow(
+          color: Colors.black.withOpacity(0.03),
+          blurRadius: 8,
+          offset: const Offset(0, 3),
         ),
-      ),
-    );
-  }
+      ],
+    ),
+    child: Row(
+      children: [
 
+        // 🔹 فراغ يسار (حتى يدفع النص لليمين)
+        const Expanded(
+          flex: 2,
+          child: SizedBox(),
+        ),
+
+        // 🔹 النص يمين
+        Expanded(
+          flex: 5,
+          child: Align(
+            alignment: Alignment.centerRight,
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.end,
+              children: [
+                Text(
+                  'شركة توزيع المنتجات النفطية',
+                  textAlign: TextAlign.right,
+                  style: TextStyle(
+                    fontSize: 14,
+                    fontWeight: FontWeight.w800,
+                    color: darkColor,
+                  ),
+                ),
+                const SizedBox(height: 2),
+                Text(
+                  'فرع البصرة',
+                  textAlign: TextAlign.right,
+                  style: TextStyle(
+                    fontSize: 13,
+                    fontWeight: FontWeight.w700,
+                    color: darkColor,
+                  ),
+                ),
+                const SizedBox(height: 4),
+                Text(
+                  'القسم الاداري / شعبة الموارد البشرية /\nوحدة العقوبات',
+                  textAlign: TextAlign.right,
+                  style: TextStyle(
+                    fontSize: 11,
+                    color: softTextColor,
+                    height: 1.3,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ],
+    ),
+  );
+}
   Widget _buildScannerDropdown() {
     if (_isLoadingScanners) {
       return Container(
-        padding: const EdgeInsets.all(16),
+        padding: const EdgeInsets.all(10),
         decoration: BoxDecoration(
-          color: Colors.white.withOpacity(0.65),
-          borderRadius: BorderRadius.circular(22),
+          color: Colors.white.withOpacity(0.72),
+          borderRadius: BorderRadius.circular(12),
           border: Border.all(color: borderColor),
         ),
         child: Row(
           children: [
             const SizedBox(
-              width: 18,
-              height: 18,
-              child: CircularProgressIndicator(strokeWidth: 2.2),
+              width: 14,
+              height: 14,
+              child: CircularProgressIndicator(strokeWidth: 2),
             ),
-            const SizedBox(width: 12),
+            const SizedBox(width: 8),
             Text(
               'جاري تحميل أجهزة السكانر...',
-              style: TextStyle(color: softTextColor),
+              style: TextStyle(color: softTextColor, fontSize: 11.4),
             ),
           ],
         ),
@@ -815,28 +902,29 @@ Future<void> _startScanAndImport() async {
 
     if (_scannerNames.isEmpty) {
       return Container(
-        padding: const EdgeInsets.all(16),
+        padding: const EdgeInsets.all(10),
         decoration: BoxDecoration(
-          color: Colors.white.withOpacity(0.65),
-          borderRadius: BorderRadius.circular(22),
+          color: Colors.white.withOpacity(0.72),
+          borderRadius: BorderRadius.circular(12),
           border: Border.all(color: borderColor),
         ),
         child: Row(
           children: [
-            Icon(Icons.warning_amber_rounded, color: accentColor),
-            const SizedBox(width: 10),
+            Icon(Icons.warning_amber_rounded, color: accentColor, size: 17),
+            const SizedBox(width: 8),
             Expanded(
               child: Text(
                 'لم يتم العثور على جهاز سكانر',
                 style: TextStyle(
                   color: softTextColor,
                   fontWeight: FontWeight.w600,
+                  fontSize: 11.4,
                 ),
               ),
             ),
             TextButton(
               onPressed: _loadScanners,
-              child: const Text('إعادة التحميل'),
+              child: const Text('إعادة'),
             ),
           ],
         ),
@@ -844,16 +932,16 @@ Future<void> _startScanAndImport() async {
     }
 
     return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 0),
       decoration: BoxDecoration(
-        color: Colors.white.withOpacity(0.65),
-        borderRadius: BorderRadius.circular(22),
+        color: Colors.white.withOpacity(0.72),
+        borderRadius: BorderRadius.circular(12),
         border: Border.all(color: borderColor),
         boxShadow: [
           BoxShadow(
-            color: Colors.black.withOpacity(0.04),
-            blurRadius: 14,
-            offset: const Offset(0, 4),
+            color: Colors.black.withOpacity(0.02),
+            blurRadius: 5,
+            offset: const Offset(0, 1),
           ),
         ],
       ),
@@ -861,7 +949,12 @@ Future<void> _startScanAndImport() async {
         child: DropdownButton<int>(
           value: _selectedScannerIndex,
           isExpanded: true,
-          borderRadius: BorderRadius.circular(16),
+          borderRadius: BorderRadius.circular(12),
+          style: TextStyle(
+            color: darkColor,
+            fontSize: 12.4,
+            fontWeight: FontWeight.w600,
+          ),
           items: List.generate(_scannerNames.length, (index) {
             return DropdownMenuItem<int>(
               value: index,
@@ -893,7 +986,7 @@ Future<void> _startScanAndImport() async {
             Text(
               'الصور المسحوبة',
               style: TextStyle(
-                fontSize: 18,
+                fontSize: 13,
                 fontWeight: FontWeight.w800,
                 color: darkColor,
               ),
@@ -901,42 +994,39 @@ Future<void> _startScanAndImport() async {
             const Spacer(),
             TextButton.icon(
               onPressed: _clearScannedImages,
-              icon: const Icon(Icons.delete_outline),
+              icon: const Icon(Icons.delete_outline, size: 16),
               label: const Text('مسح الصور'),
             ),
           ],
         ),
-        const SizedBox(height: 12),
+        const SizedBox(height: 6),
         SizedBox(
-          height: 170,
+          height: 90,
           child: ListView.separated(
             scrollDirection: Axis.horizontal,
             itemCount: _scannedImagePaths.length,
-            separatorBuilder: (_, __) => const SizedBox(width: 12),
+            separatorBuilder: (_, _) => const SizedBox(width: 6),
             itemBuilder: (context, index) {
               final imagePath = _scannedImagePaths[index];
               final imageFile = File(imagePath);
 
               return Container(
-                width: 130,
+                width: 72,
                 decoration: BoxDecoration(
-                  borderRadius: BorderRadius.circular(18),
+                  borderRadius: BorderRadius.circular(10),
                   border: Border.all(color: borderColor),
                   boxShadow: [
                     BoxShadow(
-                      color: Colors.black.withOpacity(0.05),
-                      blurRadius: 10,
-                      offset: const Offset(0, 4),
+                      color: Colors.black.withOpacity(0.02),
+                      blurRadius: 4,
+                      offset: const Offset(0, 1),
                     ),
                   ],
                 ),
                 child: ClipRRect(
-                  borderRadius: BorderRadius.circular(18),
+                  borderRadius: BorderRadius.circular(10),
                   child: imageFile.existsSync()
-                      ? Image.file(
-                          imageFile,
-                          fit: BoxFit.cover,
-                        )
+                      ? Image.file(imageFile, fit: BoxFit.cover)
                       : Container(
                           color: Colors.grey.shade200,
                           child: const Center(
@@ -961,26 +1051,26 @@ Future<void> _startScanAndImport() async {
         'لا توجد صور متاحة للعرض',
         style: TextStyle(
           color: softTextColor,
-          fontSize: 14,
+          fontSize: 11.2,
         ),
       );
     }
 
     return SizedBox(
-      height: 150,
+      height: 76,
       child: ListView.separated(
         scrollDirection: Axis.horizontal,
         itemCount: validPaths.length,
-        separatorBuilder: (_, __) => const SizedBox(width: 10),
+        separatorBuilder: (_, _) => const SizedBox(width: 6),
         itemBuilder: (context, index) {
           return Container(
-            width: 115,
+            width: 60,
             decoration: BoxDecoration(
-              borderRadius: BorderRadius.circular(18),
+              borderRadius: BorderRadius.circular(10),
               border: Border.all(color: borderColor),
             ),
             child: ClipRRect(
-              borderRadius: BorderRadius.circular(18),
+              borderRadius: BorderRadius.circular(10),
               child: Image.file(
                 File(validPaths[index]),
                 fit: BoxFit.cover,
@@ -992,18 +1082,99 @@ Future<void> _startScanAndImport() async {
     );
   }
 
+  Widget _buildActionButton({
+    required VoidCallback? onPressed,
+    required String label,
+    required IconData icon,
+    bool dark = false,
+    bool loading = false,
+    double height = 34,
+  }) {
+    return SizedBox(
+      width: double.infinity,
+      height: height,
+      child: ElevatedButton.icon(
+        onPressed: onPressed,
+        style: ElevatedButton.styleFrom(
+          backgroundColor: dark ? darkColor : accentColor,
+          foregroundColor: Colors.white,
+          elevation: 0,
+          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 0),
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(12),
+          ),
+        ),
+        icon: loading
+            ? const SizedBox(
+                width: 13,
+                height: 13,
+                child: CircularProgressIndicator(
+                  color: Colors.white,
+                  strokeWidth: 2,
+                ),
+              )
+            : Icon(icon, size: 15),
+        label: Text(
+          label,
+          style: const TextStyle(
+            fontSize: 11.4,
+            fontWeight: FontWeight.w700,
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildOutlinedActionButton({
+    required VoidCallback? onPressed,
+    required String label,
+    required IconData icon,
+    bool loading = false,
+    double height = 34,
+  }) {
+    return SizedBox(
+      width: double.infinity,
+      height: height,
+      child: OutlinedButton.icon(
+        onPressed: onPressed,
+        style: OutlinedButton.styleFrom(
+          foregroundColor: darkColor,
+          side: BorderSide(color: borderColor),
+          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 0),
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(12),
+          ),
+        ),
+        icon: loading
+            ? const SizedBox(
+                width: 13,
+                height: 13,
+                child: CircularProgressIndicator(strokeWidth: 2),
+              )
+            : Icon(icon, size: 15),
+        label: Text(
+          label,
+          style: const TextStyle(
+            fontSize: 11.2,
+            fontWeight: FontWeight.w700,
+          ),
+        ),
+      ),
+    );
+  }
+
   Widget _buildSearchCard() {
     return Container(
-      padding: const EdgeInsets.all(22),
+      padding: const EdgeInsets.all(12),
       decoration: BoxDecoration(
         color: cardColor,
-        borderRadius: BorderRadius.circular(30),
+        borderRadius: BorderRadius.circular(18),
         border: Border.all(color: borderColor),
         boxShadow: [
           BoxShadow(
-            color: Colors.black.withOpacity(0.05),
-            blurRadius: 16,
-            offset: const Offset(0, 8),
+            color: Colors.black.withOpacity(0.03),
+            blurRadius: 8,
+            offset: const Offset(0, 3),
           ),
         ],
       ),
@@ -1012,75 +1183,33 @@ Future<void> _startScanAndImport() async {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Text(
-              'البحث عن ملف',
-              style: TextStyle(
-                fontSize: 22,
-                fontWeight: FontWeight.w800,
-                color: darkColor,
-              ),
-            ),
+            _buildSectionTitle('البحث عن ملف', icon: Icons.search_rounded),
             const SizedBox(height: 8),
-            Text(
-              'يمكنك البحث برقم الملف أو بكلمة موجودة داخل اسم الملف أو الملاحظات.',
-              style: TextStyle(
-                color: softTextColor,
-                height: 1.6,
-              ),
-            ),
-            const SizedBox(height: 18),
             _buildTextField(
               label: 'رقم الملف أو نص البحث',
-              icon: Icons.search_rounded,
+              icon: Icons.manage_search_rounded,
               controller: _searchController,
               hint: 'مثال: 12345 أو كلمة من الملاحظات',
             ),
-            const SizedBox(height: 16),
+            const SizedBox(height: 8),
             Row(
               children: [
                 Expanded(
-                  child: ElevatedButton.icon(
+                  child: _buildActionButton(
                     onPressed: _isSearching ? null : _searchDocument,
-                    style: ElevatedButton.styleFrom(
-                      backgroundColor: accentColor,
-                      foregroundColor: Colors.white,
-                      elevation: 0,
-                      shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(20),
-                      ),
-                    ),
-                    icon: _isSearching
-                        ? const SizedBox(
-                            width: 18,
-                            height: 18,
-                            child: CircularProgressIndicator(
-                              color: Colors.white,
-                              strokeWidth: 2.2,
-                            ),
-                          )
-                        : const Icon(Icons.search),
-                    label: Text(
-                      _isSearching ? 'جاري البحث...' : 'بحث',
-                      style: const TextStyle(fontWeight: FontWeight.w700),
-                    ),
+                    label: _isSearching ? 'جاري البحث...' : 'بحث',
+                    icon: Icons.search,
+                    loading: _isSearching,
+                    height: 34,
                   ),
                 ),
-                const SizedBox(width: 12),
+                const SizedBox(width: 6),
                 Expanded(
-                  child: OutlinedButton.icon(
+                  child: _buildOutlinedActionButton(
                     onPressed: _clearSearch,
-                    style: OutlinedButton.styleFrom(
-                      foregroundColor: darkColor,
-                      side: BorderSide(color: borderColor),
-                      shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(20),
-                      ),
-                    ),
-                    icon: const Icon(Icons.close),
-                    label: const Text(
-                      'مسح',
-                      style: TextStyle(fontWeight: FontWeight.w700),
-                    ),
+                    label: 'مسح',
+                    icon: Icons.close,
+                    height: 34,
                   ),
                 ),
               ],
@@ -1091,184 +1220,36 @@ Future<void> _startScanAndImport() async {
     );
   }
 
-  Widget _buildInfoCard() {
-    return Container(
-      padding: const EdgeInsets.all(22),
-      decoration: BoxDecoration(
-        color: cardColor,
-        borderRadius: BorderRadius.circular(30),
-        border: Border.all(color: borderColor),
-        boxShadow: [
-          BoxShadow(
-            color: Colors.black.withOpacity(0.05),
-            blurRadius: 16,
-            offset: const Offset(0, 8),
-          ),
-        ],
-      ),
-      child: Directionality(
-        textDirection: ui.TextDirection.rtl,
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
+  Widget _buildMiniInfoRow(String title, String value) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 5),
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 7),
+        decoration: BoxDecoration(
+          color: Colors.white.withOpacity(0.72),
+          borderRadius: BorderRadius.circular(10),
+          border: Border.all(color: borderColor),
+        ),
+        child: Row(
           children: [
-            Text(
-              'بيانات الملف',
-              style: TextStyle(
-                fontSize: 22,
-                fontWeight: FontWeight.w800,
-                color: darkColor,
+            Expanded(
+              child: Text(
+                value.isEmpty ? '-' : value,
+                textAlign: TextAlign.right,
+                style: TextStyle(
+                  color: darkColor,
+                  fontWeight: FontWeight.w600,
+                  fontSize: 11.2,
+                ),
               ),
             ),
-            const SizedBox(height: 8),
+            const SizedBox(width: 6),
             Text(
-              'اسحب الملف من جهاز السكانر ثم أدخل البيانات الأساسية واضغط حفظ.',
+              '$title:',
               style: TextStyle(
                 color: softTextColor,
-                height: 1.6,
-              ),
-            ),
-            const SizedBox(height: 24),
-            _buildScannerDropdown(),
-            const SizedBox(height: 16),
-            SizedBox(
-              width: double.infinity,
-              height: 56,
-              child: ElevatedButton.icon(
-                onPressed: _isScanning ? null : _startScanAndImport,
-                style: ElevatedButton.styleFrom(
-                  backgroundColor: accentColor,
-                  foregroundColor: Colors.white,
-                  elevation: 0,
-                  shape: RoundedRectangleBorder(
-                    borderRadius: BorderRadius.circular(22),
-                  ),
-                ),
-                icon: _isScanning
-                    ? const SizedBox(
-                        width: 20,
-                        height: 20,
-                        child: CircularProgressIndicator(
-                          color: Colors.white,
-                          strokeWidth: 2.4,
-                        ),
-                      )
-                    : const Icon(Icons.document_scanner_outlined),
-                label: Text(
-                  _isScanning ? 'جاري انتظار الصور...' : 'سحب من السكانر',
-                  style: const TextStyle(
-                    fontSize: 16,
-                    fontWeight: FontWeight.w700,
-                  ),
-                ),
-              ),
-            ),
-            const SizedBox(height: 12),
-            SizedBox(
-              width: double.infinity,
-              height: 52,
-              child: OutlinedButton.icon(
-                onPressed: _isImportingTempImages
-                    ? null
-                    : () => _loadScannedImagesFromFolder(),
-                style: OutlinedButton.styleFrom(
-                  foregroundColor: darkColor,
-                  side: BorderSide(color: borderColor),
-                  shape: RoundedRectangleBorder(
-                    borderRadius: BorderRadius.circular(22),
-                  ),
-                ),
-                icon: _isImportingTempImages
-                    ? const SizedBox(
-                        width: 18,
-                        height: 18,
-                        child: CircularProgressIndicator(strokeWidth: 2.2),
-                      )
-                    : const Icon(Icons.folder_open_outlined),
-                label: Text(
-                  _isImportingTempImages
-                      ? 'جاري تحميل الصور...'
-                      : 'تحميل الصور من مجلد السحب',
-                  style: const TextStyle(
-                    fontSize: 15,
-                    fontWeight: FontWeight.w700,
-                  ),
-                ),
-              ),
-            ),
-            if (_scannedImagePaths.isNotEmpty) ...[
-              const SizedBox(height: 20),
-              _buildScannedImagesPreview(),
-            ],
-            const SizedBox(height: 24),
-            Row(
-              children: [
-                Expanded(
-                  child: _buildTextField(
-                    label: 'رقم الملف',
-                    icon: Icons.numbers_rounded,
-                    controller: _documentNumberController,
-                    hint: 'مثال: 12345',
-                  ),
-                ),
-                const SizedBox(width: 16),
-                Expanded(
-                  child: _buildTextField(
-                    label: 'تأريخ الملف',
-                    icon: Icons.calendar_month_outlined,
-                    controller: _documentDateController,
-                    hint: 'اختر التاريخ',
-                    readOnly: true,
-                    onTap: _pickDate,
-                  ),
-                ),
-              ],
-            ),
-            const SizedBox(height: 16),
-            _buildTextField(
-              label: 'اسم الملف',
-              icon: Icons.description_outlined,
-              controller: _documentTitleController,
-              hint: 'اكتب اسم الملف',
-            ),
-            const SizedBox(height: 16),
-            _buildTextField(
-              label: 'ملاحظات',
-              icon: Icons.sticky_note_2_outlined,
-              controller: _notesController,
-              hint: 'أدخل أي ملاحظات إضافية',
-              maxLines: 4,
-            ),
-            const SizedBox(height: 24),
-            SizedBox(
-              width: double.infinity,
-              height: 56,
-              child: ElevatedButton.icon(
-                onPressed: _isLoading ? null : _saveDocument,
-                style: ElevatedButton.styleFrom(
-                  backgroundColor: darkColor,
-                  foregroundColor: Colors.white,
-                  elevation: 0,
-                  shape: RoundedRectangleBorder(
-                    borderRadius: BorderRadius.circular(22),
-                  ),
-                ),
-                icon: _isLoading
-                    ? const SizedBox(
-                        width: 20,
-                        height: 20,
-                        child: CircularProgressIndicator(
-                          color: Colors.white,
-                          strokeWidth: 2.4,
-                        ),
-                      )
-                    : const Icon(Icons.save_outlined),
-                label: Text(
-                  _isLoading ? 'جاري الحفظ...' : 'حفظ وإنشاء فولدر',
-                  style: const TextStyle(
-                    fontSize: 16,
-                    fontWeight: FontWeight.w700,
-                  ),
-                ),
+                fontWeight: FontWeight.w700,
+                fontSize: 10.8,
               ),
             ),
           ],
@@ -1281,16 +1262,16 @@ Future<void> _startScanAndImport() async {
     final activeDocument = _searchedDocument ?? _savedDocument;
 
     return Container(
-      padding: const EdgeInsets.all(22),
+      padding: const EdgeInsets.all(12),
       decoration: BoxDecoration(
         color: cardColor,
-        borderRadius: BorderRadius.circular(30),
+        borderRadius: BorderRadius.circular(18),
         border: Border.all(color: borderColor),
         boxShadow: [
           BoxShadow(
-            color: Colors.black.withOpacity(0.05),
-            blurRadius: 16,
-            offset: const Offset(0, 8),
+            color: Colors.black.withOpacity(0.03),
+            blurRadius: 8,
+            offset: const Offset(0, 3),
           ),
         ],
       ),
@@ -1300,20 +1281,16 @@ Future<void> _startScanAndImport() async {
             ? Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Text(
-                    'نتيجة البحث / آخر عملية',
-                    style: TextStyle(
-                      fontSize: 22,
-                      fontWeight: FontWeight.w800,
-                      color: darkColor,
-                    ),
+                  _buildSectionTitle(
+                    'نتيجة البحث',
+                    icon: Icons.assignment_outlined,
                   ),
-                  const SizedBox(height: 14),
+                  const SizedBox(height: 6),
                   Text(
                     'لم يتم العثور على أي ملف بعد.',
                     style: TextStyle(
                       color: softTextColor,
-                      fontSize: 15,
+                      fontSize: 11.2,
                     ),
                   ),
                 ],
@@ -1321,17 +1298,11 @@ Future<void> _startScanAndImport() async {
             : Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Text(
-                    _searchedDocument != null
-                        ? 'نتيجة البحث'
-                        : 'آخر ملف تم إنشاؤه',
-                    style: TextStyle(
-                      fontSize: 22,
-                      fontWeight: FontWeight.w800,
-                      color: darkColor,
-                    ),
+                  _buildSectionTitle(
+                    'نتيجة البحث',
+                    icon: Icons.assignment_outlined,
                   ),
-                  const SizedBox(height: 18),
+                  const SizedBox(height: 8),
                   _buildMiniInfoRow('رقم الملف', activeDocument.documentNumber),
                   _buildMiniInfoRow('تأريخ الملف', activeDocument.documentDate),
                   _buildMiniInfoRow('اسم الملف', activeDocument.documentTitle),
@@ -1341,50 +1312,47 @@ Future<void> _startScanAndImport() async {
                     activeDocument.imagePaths.length.toString(),
                   ),
                   _buildMiniInfoRow('مسار الفولدر', activeDocument.folderPath),
-                  const SizedBox(height: 12),
-                  Row(
-                    children: [
-                      Expanded(
-                        child: ElevatedButton.icon(
-                          onPressed: () => _fillFormFromDocument(activeDocument),
-                          style: ElevatedButton.styleFrom(
-                            backgroundColor: accentColor,
-                            foregroundColor: Colors.white,
-                            shape: RoundedRectangleBorder(
-                              borderRadius: BorderRadius.circular(18),
-                            ),
-                          ),
-                          icon: const Icon(Icons.edit_note_outlined),
-                          label: const Text('تعبئة الحقول'),
-                        ),
-                      ),
-                    ],
+                  const SizedBox(height: 6),
+                  _buildActionButton(
+                    onPressed: () => _fillFormFromDocument(activeDocument),
+                    label: 'تعبئة الحقول',
+                    icon: Icons.edit_note_outlined,
+                    height: 34,
                   ),
-                  const SizedBox(height: 16),
+                  const SizedBox(height: 6),
+                  _buildActionButton(
+                    onPressed: _isPrinting ? null : _printCurrentDocument,
+                    label: _isPrinting ? 'جاري تجهيز الطباعة...' : 'طباعة الملف',
+                    icon: Icons.print_outlined,
+                    dark: true,
+                    loading: _isPrinting,
+                    height: 34,
+                  ),
+                  const SizedBox(height: 8),
                   Text(
                     'صور الملف',
                     style: TextStyle(
-                      fontSize: 18,
+                      fontSize: 12,
                       fontWeight: FontWeight.w800,
                       color: darkColor,
                     ),
                   ),
-                  const SizedBox(height: 12),
+                  const SizedBox(height: 5),
                   _buildSavedImagesPreview(activeDocument.imagePaths),
                   if (_searchResults.length > 1) ...[
-                    const SizedBox(height: 18),
+                    const SizedBox(height: 8),
                     Text(
-                      'نتائج إضافية مرتبطة بالبحث (${_searchResults.length})',
+                      'نتائج إضافية (${_searchResults.length})',
                       style: TextStyle(
-                        fontSize: 16,
+                        fontSize: 11.2,
                         fontWeight: FontWeight.w700,
                         color: darkColor,
                       ),
                     ),
-                    const SizedBox(height: 8),
+                    const SizedBox(height: 5),
                     ..._searchResults.take(5).map(
                       (doc) => Padding(
-                        padding: const EdgeInsets.only(bottom: 8),
+                        padding: const EdgeInsets.only(bottom: 4),
                         child: InkWell(
                           onTap: () {
                             setState(() {
@@ -1393,10 +1361,10 @@ Future<void> _startScanAndImport() async {
                             _fillFormFromDocument(doc);
                           },
                           child: Container(
-                            padding: const EdgeInsets.all(12),
+                            padding: const EdgeInsets.all(7),
                             decoration: BoxDecoration(
-                              color: Colors.white.withOpacity(0.65),
-                              borderRadius: BorderRadius.circular(16),
+                              color: Colors.white.withOpacity(0.72),
+                              borderRadius: BorderRadius.circular(10),
                               border: Border.all(color: borderColor),
                             ),
                             child: Text(
@@ -1404,6 +1372,7 @@ Future<void> _startScanAndImport() async {
                               style: TextStyle(
                                 color: darkColor,
                                 fontWeight: FontWeight.w600,
+                                fontSize: 10.8,
                               ),
                             ),
                           ),
@@ -1417,71 +1386,35 @@ Future<void> _startScanAndImport() async {
     );
   }
 
-  Widget _buildMiniInfoRow(String title, String value) {
-    return Padding(
-      padding: const EdgeInsets.only(bottom: 12),
-      child: Container(
-        padding: const EdgeInsets.all(14),
-        decoration: BoxDecoration(
-          color: Colors.white.withOpacity(0.65),
-          borderRadius: BorderRadius.circular(18),
-          border: Border.all(color: borderColor),
-        ),
-        child: Row(
-          children: [
-            Expanded(
-              child: Text(
-                value,
-                textAlign: TextAlign.right,
-                style: TextStyle(
-                  color: darkColor,
-                  fontWeight: FontWeight.w600,
-                ),
-              ),
-            ),
-            const SizedBox(width: 12),
-            Text(
-              '$title:',
-              style: TextStyle(
-                color: softTextColor,
-                fontWeight: FontWeight.w700,
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-
   Widget _buildPreviewNavigationButton({
     required IconData icon,
     required VoidCallback onTap,
   }) {
     return Material(
-      color: Colors.white.withOpacity(0.92),
-      borderRadius: BorderRadius.circular(14),
-      elevation: 2,
+      color: Colors.white.withOpacity(0.94),
+      borderRadius: BorderRadius.circular(8),
+      elevation: 1,
       child: InkWell(
         onTap: onTap,
-        borderRadius: BorderRadius.circular(14),
+        borderRadius: BorderRadius.circular(8),
         child: Container(
-          width: 46,
-          height: 46,
+          width: 30,
+          height: 30,
           decoration: BoxDecoration(
-            borderRadius: BorderRadius.circular(14),
+            borderRadius: BorderRadius.circular(8),
             border: Border.all(color: borderColor),
           ),
           child: Icon(
             icon,
             color: darkColor,
-            size: 24,
+            size: 18,
           ),
         ),
       ),
     );
   }
 
-  Widget _buildSideStatsCard() {
+  Widget _buildLargePreviewCard({double height = 620}) {
     final hasImages = _scannedImagePaths.isNotEmpty;
     final currentImagePath = hasImages
         ? _scannedImagePaths[_currentPreviewIndex.clamp(
@@ -1491,16 +1424,160 @@ Future<void> _startScanAndImport() async {
         : null;
 
     return Container(
-      padding: const EdgeInsets.all(22),
+      height: height,
+      padding: const EdgeInsets.all(12),
       decoration: BoxDecoration(
-        color: const Color(0xFFE7E3DB),
-        borderRadius: BorderRadius.circular(30),
+        color: cardColor,
+        borderRadius: BorderRadius.circular(18),
         border: Border.all(color: borderColor),
         boxShadow: [
           BoxShadow(
-            color: Colors.black.withOpacity(0.06),
-            blurRadius: 18,
-            offset: const Offset(0, 10),
+            color: Colors.black.withOpacity(0.04),
+            blurRadius: 10,
+            offset: const Offset(0, 4),
+          ),
+        ],
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.end,
+        children: [
+          _buildSectionTitle('الصورة الكاملة', icon: Icons.image_outlined),
+          const SizedBox(height: 8),
+          Expanded(
+            child: Container(
+              width: double.infinity,
+              padding: const EdgeInsets.all(10),
+              decoration: BoxDecoration(
+                color: Colors.white.withOpacity(0.72),
+                borderRadius: BorderRadius.circular(14),
+                border: Border.all(color: borderColor),
+              ),
+              child: hasImages
+                  ? Stack(
+                      alignment: Alignment.center,
+                      children: [
+                        ClipRRect(
+                          borderRadius: BorderRadius.circular(12),
+                          child: File(currentImagePath!).existsSync()
+                              ? Image.file(
+                                  File(currentImagePath),
+                                  fit: BoxFit.fill,
+                                  width: double.infinity,
+                                  height: double.infinity,
+                                )
+                              : Container(
+                                  width: double.infinity,
+                                  height: double.infinity,
+                                  color: Colors.grey.shade200,
+                                  child: const Center(
+                                    child: Icon(
+                                      Icons.broken_image_outlined,
+                                      size: 34,
+                                    ),
+                                  ),
+                                ),
+                        ),
+                        if (_hasMultiplePreviewImages)
+                          Positioned(
+                            right: 6,
+                            child: _buildPreviewNavigationButton(
+                              icon: Icons.chevron_right_rounded,
+                              onTap: _goToPreviousPreviewImage,
+                            ),
+                          ),
+                        if (_hasMultiplePreviewImages)
+                          Positioned(
+                            left: 6,
+                            child: _buildPreviewNavigationButton(
+                              icon: Icons.chevron_left_rounded,
+                              onTap: _goToNextPreviewImage,
+                            ),
+                          ),
+                      ],
+                    )
+                  : Center(
+                      child: Column(
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        children: [
+                          Icon(
+                            Icons.image_outlined,
+                            size: 54,
+                            color: accentColor.withOpacity(0.75),
+                          ),
+                          const SizedBox(height: 12),
+                          Text(
+                            'ستظهر الصورة الكاملة هنا',
+                            textAlign: TextAlign.center,
+                            style: TextStyle(
+                              color: softTextColor,
+                              fontSize: 13.5,
+                              fontWeight: FontWeight.w700,
+                            ),
+                          ),
+                          const SizedBox(height: 6),
+                          Text(
+                            'بعد السحب من السكانر أو تعبئة الحقول من نتيجة البحث',
+                            textAlign: TextAlign.center,
+                            style: TextStyle(
+                              color: softTextColor,
+                              fontSize: 11.2,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+            ),
+          ),
+          const SizedBox(height: 8),
+          Container(
+            width: double.infinity,
+            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
+            decoration: BoxDecoration(
+              color: accentColor.withOpacity(0.14),
+              borderRadius: BorderRadius.circular(10),
+              border: Border.all(color: accentColor.withOpacity(0.28)),
+            ),
+            child: Column(
+              children: [
+                Text(
+                  'عدد الصفحات: ${_scannedImagePaths.length}',
+                  style: TextStyle(
+                    color: darkColor,
+                    fontSize: 11.2,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+                if (_hasMultiplePreviewImages) ...[
+                  const SizedBox(height: 2),
+                  Text(
+                    'الصفحة ${_currentPreviewIndex + 1} من ${_scannedImagePaths.length}',
+                    style: TextStyle(
+                      color: softTextColor,
+                      fontSize: 10.4,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                ],
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildInfoCard() {
+    return Container(
+      padding: const EdgeInsets.all(10),
+      decoration: BoxDecoration(
+        color: cardColor,
+        borderRadius: BorderRadius.circular(18),
+        border: Border.all(color: borderColor),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withOpacity(0.03),
+            blurRadius: 8,
+            offset: const Offset(0, 3),
           ),
         ],
       ),
@@ -1509,144 +1586,91 @@ Future<void> _startScanAndImport() async {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Align(
-              alignment: Alignment.topLeft,
-              child: Icon(
-                Icons.auto_awesome,
-                color: accentColor,
-                size: 32,
+            _buildSectionTitle(
+              'بيانات الملف',
+              icon: Icons.folder_copy_outlined,
+            ),
+            const SizedBox(height: 5),
+            Text(
+              'اسحب الملف من جهاز السكانر ثم أدخل البيانات الأساسية.',
+              style: TextStyle(
+                color: softTextColor,
+                height: 1.3,
+                fontSize: 10.8,
               ),
             ),
-            const SizedBox(height: 14),
-            Expanded(
-              child: Container(
-                width: double.infinity,
-                padding: const EdgeInsets.all(14),
-                decoration: BoxDecoration(
-                  color: Colors.white.withOpacity(0.65),
-                  borderRadius: BorderRadius.circular(24),
-                  border: Border.all(color: borderColor),
+            const SizedBox(height: 8),
+            _buildScannerDropdown(),
+            const SizedBox(height: 6),
+            Row(
+              children: [
+                Expanded(
+                  child: _buildActionButton(
+                    onPressed: _isScanning ? null : _startScanAndImport,
+                    label: _isScanning ? 'جاري الانتظار...' : 'سحب من السكانر',
+                    icon: Icons.document_scanner_outlined,
+                    loading: _isScanning,
+                    height: 32,
+                  ),
                 ),
-                child: hasImages
-                    ? Column(
-                        children: [
-                          Expanded(
-                            child: Stack(
-                              alignment: Alignment.center,
-                              children: [
-                                ClipRRect(
-                                  borderRadius: BorderRadius.circular(20),
-                                  child: File(currentImagePath!).existsSync()
-                                      ? Image.file(
-                                          File(currentImagePath),
-                                          fit: BoxFit.contain,
-                                          width: double.infinity,
-                                          height: double.infinity,
-                                        )
-                                      : Container(
-                                          width: double.infinity,
-                                          height: double.infinity,
-                                          color: Colors.grey.shade200,
-                                          child: const Center(
-                                            child: Icon(
-                                              Icons.broken_image_outlined,
-                                              size: 48,
-                                            ),
-                                          ),
-                                        ),
-                                ),
-                                if (_hasMultiplePreviewImages)
-                                  Positioned(
-                                    right: 8,
-                                    child: _buildPreviewNavigationButton(
-                                      icon: Icons.chevron_right_rounded,
-                                      onTap: _goToPreviousPreviewImage,
-                                    ),
-                                  ),
-                                if (_hasMultiplePreviewImages)
-                                  Positioned(
-                                    left: 8,
-                                    child: _buildPreviewNavigationButton(
-                                      icon: Icons.chevron_left_rounded,
-                                      onTap: _goToNextPreviewImage,
-                                    ),
-                                  ),
-                              ],
-                            ),
-                          ),
-                          const SizedBox(height: 14),
-                          Container(
-                            width: double.infinity,
-                            padding: const EdgeInsets.symmetric(
-                              horizontal: 16,
-                              vertical: 12,
-                            ),
-                            decoration: BoxDecoration(
-                              color: accentColor.withOpacity(0.16),
-                              borderRadius: BorderRadius.circular(18),
-                              border: Border.all(
-                                color: accentColor.withOpacity(0.28),
-                              ),
-                            ),
-                            child: Column(
-                              children: [
-                                Text(
-                                  'عدد الصفحات المسحوبة: ${_scannedImagePaths.length}',
-                                  style: TextStyle(
-                                    color: darkColor,
-                                    fontSize: 15,
-                                    fontWeight: FontWeight.w700,
-                                  ),
-                                ),
-                                if (_hasMultiplePreviewImages) ...[
-                                  const SizedBox(height: 6),
-                                  Text(
-                                    'الصفحة ${_currentPreviewIndex + 1} من ${_scannedImagePaths.length}',
-                                    style: TextStyle(
-                                      color: softTextColor,
-                                      fontSize: 13,
-                                      fontWeight: FontWeight.w600,
-                                    ),
-                                  ),
-                                ],
-                              ],
-                            ),
-                          ),
-                        ],
-                      )
-                    : Center(
-                        child: Column(
-                          mainAxisAlignment: MainAxisAlignment.center,
-                          children: [
-                            Icon(
-                              Icons.image_outlined,
-                              size: 72,
-                              color: accentColor.withOpacity(0.75),
-                            ),
-                            const SizedBox(height: 14),
-                            Text(
-                              'ستظهر أول صورة من الملف هنا بعد السحب من السكانر',
-                              textAlign: TextAlign.center,
-                              style: TextStyle(
-                                color: softTextColor,
-                                fontSize: 16,
-                                fontWeight: FontWeight.w600,
-                                height: 1.6,
-                              ),
-                            ),
-                            const SizedBox(height: 10),
-                            Text(
-                              'وسيظهر أسفلها عدد الصفحات المسحوبة',
-                              textAlign: TextAlign.center,
-                              style: TextStyle(
-                                color: softTextColor,
-                                fontSize: 14,
-                              ),
-                            ),
-                          ],
-                        ),
-                      ),
-              ),
+                const SizedBox(width: 6),
+                Expanded(
+                  child: _buildOutlinedActionButton(
+                    onPressed: _isImportingTempImages
+                        ? null
+                        : () => _loadScannedImagesFromFolder(),
+                    label: _isImportingTempImages
+                        ? 'جاري التحميل...'
+                        : 'تحميل الصور',
+                    icon: Icons.folder_open_outlined,
+                    loading: _isImportingTempImages,
+                    height: 32,
+                  ),
+                ),
+              ],
+            ),
+            if (_scannedImagePaths.isNotEmpty) ...[
+              const SizedBox(height: 7),
+              _buildScannedImagesPreview(),
+            ],
+            const SizedBox(height: 7),
+            Row(
+              children: [
+                Expanded(
+                  child: _buildTextField(
+                    label: 'رقم الملف',
+                    icon: Icons.numbers_rounded,
+                    controller: _documentNumberController,
+                    hint: '12345',
+                  ),
+                ),
+                const SizedBox(width: 6),
+                Expanded(
+                  child: _buildTextField(
+                    label: 'تأريخ الملف',
+                    icon: Icons.calendar_month_outlined,
+                    controller: _documentDateController,
+                    hint: 'اختر التاريخ',
+                    readOnly: true,
+                    onTap: _pickDate,
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 6),
+            _buildTextField(
+              label: 'اسم الملف',
+              icon: Icons.description_outlined,
+              controller: _documentTitleController,
+              hint: 'اكتب اسم الملف',
+            ),
+            const SizedBox(height: 6),
+            _buildTextField(
+              label: 'ملاحظات',
+              icon: Icons.sticky_note_2_outlined,
+              controller: _notesController,
+              hint: 'أدخل أي ملاحظات إضافية',
+              maxLines: 2,
             ),
           ],
         ),
@@ -1654,34 +1678,83 @@ Future<void> _startScanAndImport() async {
     );
   }
 
-  Widget _buildDarkTile(String title, String subtitle) {
+  Widget _buildBottomSaveBar() {
     return Container(
-      padding: const EdgeInsets.all(14),
+      padding: const EdgeInsets.all(8),
       decoration: BoxDecoration(
-        color: Colors.white.withOpacity(0.08),
+        color: cardColor,
         borderRadius: BorderRadius.circular(18),
-        border: Border.all(color: Colors.white.withOpacity(0.06)),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Text(
-            title,
-            style: const TextStyle(
-              color: Colors.white,
-              fontWeight: FontWeight.w700,
-            ),
-          ),
-          const SizedBox(height: 6),
-          Text(
-            subtitle,
-            style: TextStyle(
-              color: Colors.white.withOpacity(0.75),
-              fontSize: 13,
-            ),
+        border: Border.all(color: borderColor),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withOpacity(0.03),
+            blurRadius: 8,
+            offset: const Offset(0, 3),
           ),
         ],
       ),
+      child: _buildActionButton(
+        onPressed: _isLoading ? null : _saveDocument,
+        label: _isLoading ? 'جاري الحفظ...' : 'حفظ',
+        icon: Icons.save_outlined,
+        dark: true,
+        loading: _isLoading,
+        height: 34,
+      ),
+    );
+  }
+
+  Widget _buildRightColumn() {
+    return Column(
+      children: [
+        _buildTopHeaderCompact(),
+        const SizedBox(height: 10),
+        _buildSearchCard(),
+        const SizedBox(height: 10),
+        _buildResultCard(),
+        const SizedBox(height: 10),
+        _buildInfoCard(),
+        const SizedBox(height: 8),
+        _buildBottomSaveBar(),
+      ],
+    );
+  }
+
+  Widget _buildWideLayout() {
+    return Directionality(
+      textDirection: ui.TextDirection.ltr,
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Expanded(
+            flex: 5,
+            child: _buildLargePreviewCard(height: 690),
+          ),
+          const SizedBox(width: 12),
+          Expanded(
+            flex: 3,
+            child: _buildRightColumn(),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildNarrowLayout() {
+    return Column(
+      children: [
+        _buildTopHeaderCompact(),
+        const SizedBox(height: 10),
+        _buildSearchCard(),
+        const SizedBox(height: 10),
+        _buildResultCard(),
+        const SizedBox(height: 10),
+        _buildInfoCard(),
+        const SizedBox(height: 10),
+        _buildLargePreviewCard(height: 460),
+        const SizedBox(height: 8),
+        _buildBottomSaveBar(),
+      ],
     );
   }
 
@@ -1703,68 +1776,18 @@ Future<void> _startScanAndImport() async {
         backgroundColor: bgColor,
         body: SafeArea(
           child: Container(
-            margin: const EdgeInsets.all(14),
-            padding: const EdgeInsets.all(18),
+            margin: const EdgeInsets.all(8),
+            padding: const EdgeInsets.all(10),
             decoration: BoxDecoration(
-              color: shellColor.withOpacity(0.55),
-              borderRadius: BorderRadius.circular(36),
+              color: shellColor.withOpacity(0.52),
+              borderRadius: BorderRadius.circular(18),
             ),
             child: LayoutBuilder(
               builder: (context, constraints) {
-                final isWide = constraints.maxWidth > 1000;
+                final isWide = constraints.maxWidth > 1100;
 
                 return SingleChildScrollView(
-                  child: Column(
-                    children: [
-                      _buildTopHeader(),
-                      const SizedBox(height: 20),
-                      if (isWide)
-                        Row(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Expanded(
-                              flex: 2,
-                              child: Column(
-                                children: [
-                                  _buildResultCard(),
-                                  const SizedBox(height: 20),
-                                  SizedBox(
-                                    height: 520,
-                                    child: _buildSideStatsCard(),
-                                  ),
-                                ],
-                              ),
-                            ),
-                            const SizedBox(width: 20),
-                            Expanded(
-                              flex: 3,
-                              child: Column(
-                                children: [
-                                  _buildSearchCard(),
-                                  const SizedBox(height: 20),
-                                  _buildInfoCard(),
-                                ],
-                              ),
-                            ),
-                          ],
-                        )
-                      else
-                        Column(
-                          children: [
-                            _buildSearchCard(),
-                            const SizedBox(height: 20),
-                            _buildInfoCard(),
-                            const SizedBox(height: 20),
-                            _buildResultCard(),
-                            const SizedBox(height: 20),
-                            SizedBox(
-                              height: 420,
-                              child: _buildSideStatsCard(),
-                            ),
-                          ],
-                        ),
-                    ],
-                  ),
+                  child: isWide ? _buildWideLayout() : _buildNarrowLayout(),
                 );
               },
             ),
