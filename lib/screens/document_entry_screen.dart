@@ -12,6 +12,7 @@ import 'package:printing/printing.dart';
 
 import '../models/document_model.dart';
 import '../services/scanner_service.dart';
+import 'documents_by_status_screen.dart';
 
 class DocumentEntryScreen extends StatefulWidget {
   const DocumentEntryScreen({super.key});
@@ -27,6 +28,15 @@ class _DocumentEntryScreenState extends State<DocumentEntryScreen> {
   final TextEditingController _documentTitleController = TextEditingController();
   final TextEditingController _notesController = TextEditingController();
   final TextEditingController _searchController = TextEditingController();
+
+  final TextEditingController _parentDocumentNumberController =
+      TextEditingController();
+  final TextEditingController _subDocumentNumberController =
+      TextEditingController();
+  final TextEditingController _reminderDateController =
+      TextEditingController();
+  final TextEditingController _reminderNoteController =
+      TextEditingController();
 
   final ScannerService _scannerService = ScannerService();
 
@@ -47,17 +57,22 @@ class _DocumentEntryScreenState extends State<DocumentEntryScreen> {
   bool _isImportingTempImages = false;
   bool _isPrinting = false;
 
+  bool _isSubDocument = false;
+  String _selectedStatus = 'قيد الإنجاز';
+
   DocumentModel? _savedDocument;
   DocumentModel? _searchedDocument;
   List<DocumentModel> _searchResults = [];
 
-  final Color bgColor = const Color(0xFFF5F1E8);
-  final Color shellColor = const Color(0xFFD7D2C8);
-  final Color cardColor = const Color(0xFFF7F3EB);
-  final Color accentColor = const Color(0xFFD4B04C);
-  final Color darkColor = const Color(0xFF2B2B2B);
-  final Color softTextColor = const Color(0xFF6E6A64);
-  final Color borderColor = const Color(0xFFE2DCCE);
+  final Color bgColor = const Color(0xFFEAF6FF);
+  final Color shellColor = const Color(0xFFD6ECFF);
+  final Color cardColor = const Color(0xFFFFFFFF);
+  final Color accentColor = const Color(0xFF1976D2);
+  final Color accentLightColor = const Color(0xFF5CB6FF);
+  final Color accentDarkColor = const Color(0xFF0D47A1);
+  final Color darkColor = const Color(0xFF0D47A1);
+  final Color softTextColor = const Color(0xFF5F7FA6);
+  final Color borderColor = const Color(0xFFB8D9F7);
 
   String get _apiBaseUrl {
     if (Platform.isAndroid) {
@@ -68,12 +83,40 @@ class _DocumentEntryScreenState extends State<DocumentEntryScreen> {
 
   bool get _hasMultiplePreviewImages => _scannedImagePaths.length > 1;
 
+  LinearGradient get _mainGradient => LinearGradient(
+        colors: [accentColor, accentLightColor],
+        begin: Alignment.centerRight,
+        end: Alignment.centerLeft,
+      );
+
+  LinearGradient get _softGradient => const LinearGradient(
+        colors: [
+          Color(0xFFF8FCFF),
+          Color(0xFFEAF6FF),
+        ],
+        begin: Alignment.topRight,
+        end: Alignment.bottomLeft,
+      );
+
+  LinearGradient get _headerGradient => const LinearGradient(
+        colors: [
+          Color(0xFFECF7FF),
+          Color(0xFFD8EEFF),
+        ],
+        begin: Alignment.topRight,
+        end: Alignment.bottomLeft,
+      );
+
   @override
   void initState() {
     super.initState();
     _loadScanners();
     _ensureArchiveRootExists();
     _ensureTempFolderExists();
+
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _checkTodayReminders();
+    });
   }
 
   Future<void> _ensureArchiveRootExists() async {
@@ -105,7 +148,141 @@ class _DocumentEntryScreenState extends State<DocumentEntryScreen> {
         lower.endsWith('.png') ||
         lower.endsWith('.bmp') ||
         lower.endsWith('.tif') ||
-        lower.endsWith('.tiff');
+        lower.endsWith('.tiff') ||
+        lower.endsWith('.webp');
+  }
+
+  String _normalizeDateOnly(DateTime date) {
+    return '${date.year.toString().padLeft(4, '0')}-'
+        '${date.month.toString().padLeft(2, '0')}-'
+        '${date.day.toString().padLeft(2, '0')}';
+  }
+
+  Future<void> _checkTodayReminders() async {
+    try {
+      final uri = Uri.parse('$_apiBaseUrl/get_documents.php');
+      final response = await http.get(uri);
+
+      if (response.statusCode != 200) return;
+
+      final data = jsonDecode(response.body);
+
+      if (data['success'] != true || data['documents'] == null) return;
+
+      final List docs = data['documents'];
+      final today = DateTime.now();
+      final todayOnly = DateTime(today.year, today.month, today.day);
+
+      final dueReminders = docs.where((item) {
+        final map = Map<String, dynamic>.from(item);
+        final reminderDateStr = (map['reminder_date'] ?? '').toString().trim();
+
+        if (reminderDateStr.isEmpty) return false;
+
+        final reminderDate = DateTime.tryParse(reminderDateStr);
+        if (reminderDate == null) return false;
+
+        final reminderOnly =
+            DateTime(reminderDate.year, reminderDate.month, reminderDate.day);
+
+        return !reminderOnly.isAfter(todayOnly);
+      }).map((e) => Map<String, dynamic>.from(e)).toList();
+
+      if (dueReminders.isEmpty || !mounted) return;
+
+      await showDialog(
+        context: context,
+        builder: (_) => AlertDialog(
+          backgroundColor: cardColor,
+          title: const Text(
+            'التذكيرات المستحقة',
+            textAlign: TextAlign.right,
+          ),
+          content: SizedBox(
+            width: 520,
+            child: SingleChildScrollView(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: dueReminders.map((item) {
+                  final recordType = (item['record_type'] ?? 'main').toString();
+                  final documentNumber =
+                      (item['document_number'] ?? '').toString();
+                  final documentTitle =
+                      (item['document_title'] ?? '').toString();
+                  final reminderDate =
+                      (item['reminder_date'] ?? '').toString();
+                  final reminderNote =
+                      (item['reminder_note'] ?? '').toString();
+
+                  final typeLabel =
+                      recordType == 'attachment' ? 'كتاب تابع' : 'ملف رئيسي';
+
+                  return Container(
+                    margin: const EdgeInsets.only(bottom: 10),
+                    padding: const EdgeInsets.all(12),
+                    decoration: BoxDecoration(
+                      gradient: _softGradient,
+                      borderRadius: BorderRadius.circular(14),
+                      border: Border.all(color: borderColor),
+                    ),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.end,
+                      children: [
+                        Text(
+                          '$typeLabel - $documentNumber',
+                          textAlign: TextAlign.right,
+                          style: TextStyle(
+                            color: darkColor,
+                            fontWeight: FontWeight.w800,
+                            fontSize: 14,
+                          ),
+                        ),
+                        const SizedBox(height: 6),
+                        Text(
+                          documentTitle,
+                          textAlign: TextAlign.right,
+                          style: TextStyle(
+                            color: darkColor,
+                            fontWeight: FontWeight.w600,
+                            fontSize: 13,
+                          ),
+                        ),
+                        const SizedBox(height: 4),
+                        Text(
+                          'تاريخ التذكير: $reminderDate',
+                          textAlign: TextAlign.right,
+                          style: TextStyle(
+                            color: softTextColor,
+                            fontSize: 12.5,
+                          ),
+                        ),
+                        if (reminderNote.isNotEmpty) ...[
+                          const SizedBox(height: 4),
+                          Text(
+                            'ملاحظة: $reminderNote',
+                            textAlign: TextAlign.right,
+                            style: TextStyle(
+                              color: softTextColor,
+                              fontSize: 12.5,
+                            ),
+                          ),
+                        ],
+                      ],
+                    ),
+                  );
+                }).toList(),
+              ),
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context),
+              child: const Text('إغلاق'),
+            ),
+          ],
+        ),
+      );
+    } catch (_) {}
   }
 
   Future<List<String>> _getScannedFilesFromTempFolder() async {
@@ -199,10 +376,7 @@ class _DocumentEntryScreenState extends State<DocumentEntryScreen> {
 
       if (files.isEmpty) {
         if (showMessage) {
-          _showMessage(
-            'لا توجد صور داخل C:\\ScannedTemp',
-            isError: true,
-          );
+          _showMessage('لا توجد صور داخل C:\\ScannedTemp', isError: true);
         }
         return;
       }
@@ -255,6 +429,7 @@ class _DocumentEntryScreenState extends State<DocumentEntryScreen> {
         context: context,
         barrierDismissible: false,
         builder: (_) => AlertDialog(
+          backgroundColor: cardColor,
           title: const Text('تنفيذ السحب'),
           content: const Text(
             'تم فتح برنامج Canon.\n'
@@ -287,10 +462,7 @@ class _DocumentEntryScreenState extends State<DocumentEntryScreen> {
       }
 
       if (!loaded) {
-        _showMessage(
-          'لم يتم العثور على صور جديدة بعد السحب',
-          isError: true,
-        );
+        _showMessage('لم يتم العثور على صور جديدة بعد السحب', isError: true);
         return;
       }
 
@@ -333,10 +505,39 @@ class _DocumentEntryScreenState extends State<DocumentEntryScreen> {
     );
 
     if (picked != null) {
-      _documentDateController.text =
-          '${picked.year.toString().padLeft(4, '0')}-'
-          '${picked.month.toString().padLeft(2, '0')}-'
-          '${picked.day.toString().padLeft(2, '0')}';
+      _documentDateController.text = _normalizeDateOnly(picked);
+      setState(() {});
+    }
+  }
+
+  Future<void> _pickReminderDate() async {
+    final now = DateTime.now();
+
+    final picked = await showDatePicker(
+      context: context,
+      initialDate: now,
+      firstDate: DateTime(2020),
+      lastDate: DateTime(2100),
+      locale: const Locale('ar'),
+      builder: (context, child) {
+        return Theme(
+          data: ThemeData(
+            useMaterial3: true,
+            colorScheme: ColorScheme.light(
+              primary: accentColor,
+              onPrimary: Colors.white,
+              surface: cardColor,
+              onSurface: darkColor,
+            ),
+            dialogTheme: DialogThemeData(backgroundColor: cardColor),
+          ),
+          child: child!,
+        );
+      },
+    );
+
+    if (picked != null) {
+      _reminderDateController.text = _normalizeDateOnly(picked);
       setState(() {});
     }
   }
@@ -355,6 +556,9 @@ class _DocumentEntryScreenState extends State<DocumentEntryScreen> {
       documentDate: (map['document_date'] ?? '').toString(),
       documentTitle: (map['document_title'] ?? '').toString(),
       notes: (map['notes'] ?? '').toString(),
+      status: (map['status'] ?? 'قيد الإنجاز').toString(),
+      reminderDate: map['reminder_date']?.toString(),
+      reminderNote: map['reminder_note']?.toString(),
       folderPath: (map['folder_path'] ?? '').toString(),
       imagePaths: imagePaths,
     );
@@ -374,7 +578,7 @@ class _DocumentEntryScreenState extends State<DocumentEntryScreen> {
       throw Exception(data['message'] ?? 'فشل جلب الملفات');
     }
 
-    final List docs = data['data'] ?? [];
+    final List docs = data['documents'] ?? [];
     return docs
         .map((item) => _documentFromJson(Map<String, dynamic>.from(item)))
         .toList();
@@ -384,7 +588,7 @@ class _DocumentEntryScreenState extends State<DocumentEntryScreen> {
     String documentNumber,
   ) async {
     final uri = Uri.parse(
-      '$_apiBaseUrl/get_document_by_number.php?number=$documentNumber',
+      '$_apiBaseUrl/get_document_by_number.php?document_number=$documentNumber',
     );
 
     final response = await http.get(uri);
@@ -395,8 +599,8 @@ class _DocumentEntryScreenState extends State<DocumentEntryScreen> {
 
     final data = jsonDecode(response.body);
 
-    if (data['success'] == true && data['data'] != null) {
-      return _documentFromJson(Map<String, dynamic>.from(data['data']));
+    if (data['success'] == true && data['document'] != null) {
+      return _documentFromJson(Map<String, dynamic>.from(data['document']));
     }
 
     return null;
@@ -413,6 +617,9 @@ class _DocumentEntryScreenState extends State<DocumentEntryScreen> {
         'document_date': document.documentDate,
         'document_title': document.documentTitle,
         'notes': document.notes,
+        'status': document.status,
+        'reminder_date': document.reminderDate,
+        'reminder_note': document.reminderNote,
         'folder_path': document.folderPath,
         'image_paths': document.imagePaths,
       }),
@@ -429,6 +636,46 @@ class _DocumentEntryScreenState extends State<DocumentEntryScreen> {
     }
   }
 
+  Future<void> _insertAttachmentToApi({
+    required String parentDocumentNumber,
+    required String subDocumentNumber,
+    required String subDocumentDate,
+    required String subDocumentTitle,
+    required String notes,
+    String? reminderDate,
+    String? reminderNote,
+    required String folderPath,
+    required List<String> imagePaths,
+  }) async {
+    final uri = Uri.parse('$_apiBaseUrl/insert_attachment.php');
+
+    final response = await http.post(
+      uri,
+      headers: {'Content-Type': 'application/json; charset=UTF-8'},
+      body: jsonEncode({
+        'parent_document_number': parentDocumentNumber,
+        'sub_document_number': subDocumentNumber,
+        'sub_document_date': subDocumentDate,
+        'sub_document_title': subDocumentTitle,
+        'notes': notes,
+        'reminder_date': reminderDate,
+        'reminder_note': reminderNote,
+        'folder_path': folderPath,
+        'image_paths': imagePaths,
+      }),
+    );
+
+    if (response.statusCode != 200) {
+      throw Exception('فشل الاتصال بالخادم أثناء حفظ الكتاب التابع');
+    }
+
+    final data = jsonDecode(response.body);
+
+    if (data['success'] != true) {
+      throw Exception(data['message'] ?? 'فشل حفظ الكتاب التابع');
+    }
+  }
+
   Future<List<DocumentModel>> _searchDocumentsInApi(String query) async {
     final allDocuments = await _fetchAllDocumentsFromApi();
     final lowerQuery = query.toLowerCase();
@@ -441,6 +688,77 @@ class _DocumentEntryScreenState extends State<DocumentEntryScreen> {
 
     results.sort((a, b) => b.documentDate.compareTo(a.documentDate));
     return results;
+  }
+
+  String _resolveDocumentRootFolderPath(String folderPath) {
+    if (folderPath.trim().isEmpty) return '';
+
+    final normalized = p.normalize(folderPath);
+    final folderName = p.basename(normalized).toLowerCase();
+
+    if (folderName == 'original') {
+      return p.dirname(normalized);
+    }
+
+    return normalized;
+  }
+
+  int _extractLeadingNumber(String filePath) {
+    final fileName = p.basenameWithoutExtension(filePath).trim();
+    final match = RegExp(r'^\d+').firstMatch(fileName);
+    if (match == null) return -1;
+    return int.tryParse(match.group(0) ?? '') ?? -1;
+  }
+
+  Future<List<String>> _loadAllImagesFromDocumentFolder(
+      String folderPath) async {
+    try {
+      final rootFolderPath = _resolveDocumentRootFolderPath(folderPath);
+
+      if (rootFolderPath.isEmpty) {
+        return [];
+      }
+
+      final rootDir = Directory(rootFolderPath);
+      if (!await rootDir.exists()) {
+        return [];
+      }
+
+      final List<String> imagePaths = [];
+
+      await for (final entity
+          in rootDir.list(recursive: true, followLinks: false)) {
+        if (entity is File && _isImageFile(entity.path)) {
+          imagePaths.add(entity.path);
+        }
+      }
+
+      imagePaths.sort((a, b) {
+        final aIsOriginal = a.toLowerCase().contains(
+          '${Platform.pathSeparator}original${Platform.pathSeparator}',
+        );
+        final bIsOriginal = b.toLowerCase().contains(
+          '${Platform.pathSeparator}original${Platform.pathSeparator}',
+        );
+
+        if (aIsOriginal && !bIsOriginal) return -1;
+        if (!aIsOriginal && bIsOriginal) return 1;
+
+        final aNum = _extractLeadingNumber(a);
+        final bNum = _extractLeadingNumber(b);
+
+        if (aNum != -1 && bNum != -1 && aNum != bNum) {
+          return aNum.compareTo(bNum);
+        }
+
+        return a.toLowerCase().compareTo(b.toLowerCase());
+      });
+
+      return imagePaths;
+    } catch (e) {
+      _showMessage('حدث خطأ أثناء جلب صور الملف: $e', isError: true);
+      return [];
+    }
   }
 
   Future<void> _searchDocument() async {
@@ -468,7 +786,7 @@ class _DocumentEntryScreenState extends State<DocumentEntryScreen> {
       if (_searchedDocument == null) {
         _showMessage('لم يتم العثور على نتيجة', isError: true);
       } else {
-        _fillFormFromDocument(_searchedDocument!);
+        await _fillFormFromDocument(_searchedDocument!);
         _showMessage('تم العثور على ${results.length} نتيجة');
       }
     } catch (e) {
@@ -492,16 +810,30 @@ class _DocumentEntryScreenState extends State<DocumentEntryScreen> {
     });
   }
 
-  void _fillFormFromDocument(DocumentModel document) {
-    final existingImages =
-        document.imagePaths.where((path) => File(path).existsSync()).toList();
+  Future<void> _fillFormFromDocument(DocumentModel document) async {
+    List<String> folderImages = [];
+
+    if (document.folderPath.trim().isNotEmpty) {
+      folderImages = await _loadAllImagesFromDocumentFolder(document.folderPath);
+    }
+
+    if (folderImages.isEmpty) {
+      folderImages =
+          document.imagePaths.where((path) => File(path).existsSync()).toList();
+    }
 
     setState(() {
+      _isSubDocument = false;
       _documentNumberController.text = document.documentNumber;
       _documentDateController.text = document.documentDate;
       _documentTitleController.text = document.documentTitle;
       _notesController.text = document.notes;
-      _scannedImagePaths = existingImages;
+      _selectedStatus = document.status;
+      _reminderDateController.text = document.reminderDate ?? '';
+      _reminderNoteController.text = document.reminderNote ?? '';
+      _parentDocumentNumberController.text = document.documentNumber;
+      _subDocumentNumberController.clear();
+      _scannedImagePaths = folderImages;
       _currentPreviewIndex = 0;
     });
   }
@@ -514,15 +846,64 @@ class _DocumentEntryScreenState extends State<DocumentEntryScreen> {
     _showMessage('تم مسح الصور المعروضة');
   }
 
-  Future<String> _createDocumentFolder(String documentNumber) async {
-    final folderPath = p.join(_archiveRootPath, documentNumber);
-    final folder = Directory(folderPath);
+  Future<String> _createMainDocumentFolder(String documentNumber) async {
+    final mainFolderPath = p.join(_archiveRootPath, documentNumber);
+    final originalFolderPath = p.join(mainFolderPath, 'original');
 
-    if (!await folder.exists()) {
-      await folder.create(recursive: true);
+    final mainFolder = Directory(mainFolderPath);
+    final originalFolder = Directory(originalFolderPath);
+
+    if (!await mainFolder.exists()) {
+      await mainFolder.create(recursive: true);
     }
 
-    return folderPath;
+    if (!await originalFolder.exists()) {
+      await originalFolder.create(recursive: true);
+    }
+
+    return originalFolderPath;
+  }
+
+  Future<String> _createAttachmentFolder({
+    required String parentDocumentNumber,
+    required String subDocumentNumber,
+  }) async {
+    final mainFolderPath = p.join(_archiveRootPath, parentDocumentNumber);
+    final attachmentFolderPath = p.join(mainFolderPath, subDocumentNumber);
+
+    final mainFolder = Directory(mainFolderPath);
+    final attachmentFolder = Directory(attachmentFolderPath);
+
+    if (!await mainFolder.exists()) {
+      throw Exception('الملف الأصلي غير موجود');
+    }
+
+    if (!await attachmentFolder.exists()) {
+      await attachmentFolder.create(recursive: true);
+    }
+
+    return attachmentFolderPath;
+  }
+
+  Future<int> _getNextImageIndex(String folderPath) async {
+    final dir = Directory(folderPath);
+    if (!await dir.exists()) return 1;
+
+    final files = await dir.list().where((e) => e is File).cast<File>().toList();
+
+    final numbers = <int>[];
+
+    for (final file in files) {
+      final fileName = p.basenameWithoutExtension(file.path);
+      final number = int.tryParse(fileName);
+      if (number != null) {
+        numbers.add(number);
+      }
+    }
+
+    if (numbers.isEmpty) return 1;
+    numbers.sort();
+    return numbers.last + 1;
   }
 
   Future<List<String>> _moveScannedFilesToDocumentFolder({
@@ -530,21 +911,22 @@ class _DocumentEntryScreenState extends State<DocumentEntryScreen> {
     required String targetFolderPath,
   }) async {
     final List<String> movedPaths = [];
+    int nextIndex = await _getNextImageIndex(targetFolderPath);
 
-    for (int i = 0; i < scannedFiles.length; i++) {
-      final oldPath = scannedFiles[i];
+    for (final oldPath in scannedFiles) {
       final oldFile = File(oldPath);
 
       if (!await oldFile.exists()) continue;
 
       final extension = p.extension(oldPath).toLowerCase();
-      final newPath = p.join(targetFolderPath, '${i + 1}$extension');
+      final newPath = p.join(targetFolderPath, '$nextIndex$extension');
       final newFile = File(newPath);
 
       await oldFile.copy(newPath);
       await oldFile.delete();
 
       movedPaths.add(newFile.path);
+      nextIndex++;
     }
 
     return movedPaths;
@@ -555,10 +937,26 @@ class _DocumentEntryScreenState extends State<DocumentEntryScreen> {
     final documentDate = _documentDateController.text.trim();
     final documentTitle = _documentTitleController.text.trim();
     final notes = _notesController.text.trim();
+    final parentDocumentNumber = _parentDocumentNumberController.text.trim();
+    final subDocumentNumber = _subDocumentNumberController.text.trim();
+    final reminderDate = _reminderDateController.text.trim();
+    final reminderNote = _reminderNoteController.text.trim();
 
-    if (documentNumber.isEmpty) {
-      _showMessage('يرجى إدخال رقم الملف', isError: true);
-      return;
+    if (_isSubDocument) {
+      if (parentDocumentNumber.isEmpty) {
+        _showMessage('يرجى إدخال رقم الملف الأصلي', isError: true);
+        return;
+      }
+
+      if (subDocumentNumber.isEmpty) {
+        _showMessage('يرجى إدخال رقم الكتاب التابع', isError: true);
+        return;
+      }
+    } else {
+      if (documentNumber.isEmpty) {
+        _showMessage('يرجى إدخال رقم الملف', isError: true);
+        return;
+      }
     }
 
     if (documentDate.isEmpty) {
@@ -581,36 +979,79 @@ class _DocumentEntryScreenState extends State<DocumentEntryScreen> {
     });
 
     try {
-      final existingDocument =
-          await _fetchDocumentByNumberFromApi(documentNumber);
+      if (_isSubDocument) {
+        final parentDocument =
+            await _fetchDocumentByNumberFromApi(parentDocumentNumber);
 
-      if (existingDocument != null) {
-        _showMessage('هذا الملف موجود مسبقاً', isError: true);
-        return;
+        if (parentDocument == null) {
+          _showMessage('الملف الأصلي غير موجود', isError: true);
+          return;
+        }
+
+        final folderPath = await _createAttachmentFolder(
+          parentDocumentNumber: parentDocumentNumber,
+          subDocumentNumber: subDocumentNumber,
+        );
+
+        final movedImages = await _moveScannedFilesToDocumentFolder(
+          scannedFiles: _scannedImagePaths,
+          targetFolderPath: folderPath,
+        );
+
+        if (movedImages.isEmpty) {
+          throw Exception('لم يتم نقل الصور إلى فولدر الكتاب التابع');
+        }
+
+        await _insertAttachmentToApi(
+          parentDocumentNumber: parentDocumentNumber,
+          subDocumentNumber: subDocumentNumber,
+          subDocumentDate: documentDate,
+          subDocumentTitle: documentTitle,
+          notes: notes,
+          reminderDate: reminderDate.isEmpty ? null : reminderDate,
+          reminderNote: reminderNote.isEmpty ? null : reminderNote,
+          folderPath: folderPath,
+          imagePaths: movedImages,
+        );
+
+        _showMessage('تم حفظ الكتاب التابع داخل الملف الأصلي بنجاح');
+      } else {
+        final existingDocument =
+            await _fetchDocumentByNumberFromApi(documentNumber);
+
+        if (existingDocument != null) {
+          _showMessage('هذا الملف موجود مسبقاً', isError: true);
+          return;
+        }
+
+        final folderPath = await _createMainDocumentFolder(documentNumber);
+
+        final movedImages = await _moveScannedFilesToDocumentFolder(
+          scannedFiles: _scannedImagePaths,
+          targetFolderPath: folderPath,
+        );
+
+        if (movedImages.isEmpty) {
+          throw Exception('لم يتم نقل الصور إلى فولدر الملف');
+        }
+
+        final document = DocumentModel(
+          id: null,
+          documentNumber: documentNumber,
+          documentDate: documentDate,
+          documentTitle: documentTitle,
+          notes: notes,
+          status: _selectedStatus,
+          reminderDate: reminderDate.isEmpty ? null : reminderDate,
+          reminderNote: reminderNote.isEmpty ? null : reminderNote,
+          folderPath: folderPath,
+          imagePaths: movedImages,
+        );
+
+        await _insertDocumentToApi(document);
+
+        _showMessage('تم حفظ الملف الرئيسي في قاعدة البيانات بنجاح');
       }
-
-      final folderPath = await _createDocumentFolder(documentNumber);
-
-      final movedImages = await _moveScannedFilesToDocumentFolder(
-        scannedFiles: _scannedImagePaths,
-        targetFolderPath: folderPath,
-      );
-
-      if (movedImages.isEmpty) {
-        throw Exception('لم يتم نقل الصور إلى فولدر الملف');
-      }
-
-      final document = DocumentModel(
-        id: null,
-        documentNumber: documentNumber,
-        documentDate: documentDate,
-        documentTitle: documentTitle,
-        notes: notes,
-        folderPath: folderPath,
-        imagePaths: movedImages,
-      );
-
-      await _insertDocumentToApi(document);
 
       setState(() {
         _savedDocument = null;
@@ -618,15 +1059,19 @@ class _DocumentEntryScreenState extends State<DocumentEntryScreen> {
         _searchResults = [];
         _scannedImagePaths = [];
         _currentPreviewIndex = 0;
+        _selectedStatus = 'قيد الإنجاز';
+        _isSubDocument = false;
       });
-
-      _showMessage('تم حفظ الملف في قاعدة البيانات وإنشاء الفولدر بنجاح');
 
       _documentNumberController.clear();
       _documentDateController.clear();
       _documentTitleController.clear();
       _notesController.clear();
       _searchController.clear();
+      _parentDocumentNumberController.clear();
+      _subDocumentNumberController.clear();
+      _reminderDateController.clear();
+      _reminderNoteController.clear();
     } catch (e) {
       _showMessage('حدث خطأ أثناء الحفظ: $e', isError: true);
     } finally {
@@ -646,9 +1091,15 @@ class _DocumentEntryScreenState extends State<DocumentEntryScreen> {
       return;
     }
 
-    final validImagePaths = activeDocument.imagePaths
+    final previewImages =
+        _scannedImagePaths.where((path) => File(path).existsSync()).toList();
+
+    final fallbackImages = activeDocument.imagePaths
         .where((path) => File(path).existsSync() && _isImageFile(path))
         .toList();
+
+    final validImagePaths =
+        previewImages.isNotEmpty ? previewImages : fallbackImages;
 
     if (validImagePaths.isEmpty) {
       _showMessage('لا توجد صور صالحة للطباعة لهذا الملف', isError: true);
@@ -707,6 +1158,22 @@ class _DocumentEntryScreenState extends State<DocumentEntryScreen> {
     );
   }
 
+  BoxDecoration _cardDecoration({bool gradient = true}) {
+    return BoxDecoration(
+      color: gradient ? null : cardColor,
+      gradient: gradient ? _softGradient : null,
+      borderRadius: BorderRadius.circular(22),
+      border: Border.all(color: borderColor),
+      boxShadow: [
+        BoxShadow(
+          color: Colors.black.withOpacity(0.035),
+          blurRadius: 10,
+          offset: const Offset(0, 3),
+        ),
+      ],
+    );
+  }
+
   Widget _buildTextField({
     required String label,
     required IconData icon,
@@ -720,14 +1187,14 @@ class _DocumentEntryScreenState extends State<DocumentEntryScreen> {
 
     return Container(
       decoration: BoxDecoration(
-        color: Colors.white.withOpacity(0.72),
-        borderRadius: BorderRadius.circular(12),
+        color: Colors.white.withOpacity(0.88),
+        borderRadius: BorderRadius.circular(16),
         border: Border.all(color: borderColor),
         boxShadow: [
           BoxShadow(
-            color: Colors.black.withOpacity(0.02),
-            blurRadius: 5,
-            offset: const Offset(0, 1),
+            color: accentColor.withOpacity(0.04),
+            blurRadius: 6,
+            offset: const Offset(0, 2),
           ),
         ],
       ),
@@ -739,43 +1206,43 @@ class _DocumentEntryScreenState extends State<DocumentEntryScreen> {
         onTap: onTap,
         textAlign: TextAlign.right,
         style: TextStyle(
-          fontSize: 12.4,
+          fontSize: 15,
           color: darkColor,
           fontWeight: FontWeight.w600,
         ),
         decoration: InputDecoration(
           hintText: hint,
           hintStyle: TextStyle(
-            color: softTextColor.withOpacity(0.7),
-            fontSize: 11.4,
+            color: softTextColor.withOpacity(0.72),
+            fontSize: 13.2,
           ),
           labelText: label,
           labelStyle: TextStyle(
             color: softTextColor,
-            fontSize: 11.4,
-            fontWeight: FontWeight.w600,
+            fontSize: 13.2,
+            fontWeight: FontWeight.w700,
           ),
           alignLabelWithHint: true,
           prefixIcon: Icon(
             icon,
             color: accentColor,
-            size: 18,
+            size: 20,
           ),
           contentPadding: EdgeInsets.symmetric(
-            horizontal: 10,
-            vertical: isMultiline ? 8 : 6,
+            horizontal: 14,
+            vertical: isMultiline ? 16 : 14,
           ),
           border: OutlineInputBorder(
-            borderRadius: BorderRadius.circular(12),
+            borderRadius: BorderRadius.circular(16),
             borderSide: BorderSide.none,
           ),
           enabledBorder: OutlineInputBorder(
-            borderRadius: BorderRadius.circular(12),
+            borderRadius: BorderRadius.circular(16),
             borderSide: BorderSide(color: borderColor),
           ),
           focusedBorder: OutlineInputBorder(
-            borderRadius: BorderRadius.circular(12),
-            borderSide: BorderSide(color: accentColor, width: 1.1),
+            borderRadius: BorderRadius.circular(16),
+            borderSide: BorderSide(color: accentColor, width: 1.4),
           ),
           filled: true,
           fillColor: Colors.transparent,
@@ -788,13 +1255,13 @@ class _DocumentEntryScreenState extends State<DocumentEntryScreen> {
     return Row(
       children: [
         if (icon != null) ...[
-          Icon(icon, color: accentColor, size: 18),
-          const SizedBox(width: 6),
+          Icon(icon, color: accentColor, size: 22),
+          const SizedBox(width: 8),
         ],
         Text(
           title,
           style: TextStyle(
-            fontSize: 16,
+            fontSize: 19,
             fontWeight: FontWeight.w800,
             color: darkColor,
           ),
@@ -803,97 +1270,94 @@ class _DocumentEntryScreenState extends State<DocumentEntryScreen> {
     );
   }
 
- Widget _buildTopHeaderCompact() {
-  return Container(
-    width: double.infinity,
-    padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
-    decoration: BoxDecoration(
-      color: cardColor,
-      borderRadius: BorderRadius.circular(20),
-      border: Border.all(color: borderColor),
-      boxShadow: [
-        BoxShadow(
-          color: Colors.black.withOpacity(0.03),
-          blurRadius: 8,
-          offset: const Offset(0, 3),
-        ),
-      ],
-    ),
-    child: Row(
-      children: [
-
-        // 🔹 فراغ يسار (حتى يدفع النص لليمين)
-        const Expanded(
-          flex: 2,
-          child: SizedBox(),
-        ),
-
-        // 🔹 النص يمين
-        Expanded(
-          flex: 5,
-          child: Align(
-            alignment: Alignment.centerRight,
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.end,
-              children: [
-                Text(
-                  'شركة توزيع المنتجات النفطية',
-                  textAlign: TextAlign.right,
-                  style: TextStyle(
-                    fontSize: 14,
-                    fontWeight: FontWeight.w800,
-                    color: darkColor,
+  Widget _buildTopHeaderCompact() {
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.symmetric(horizontal: 22, vertical: 18),
+      decoration: BoxDecoration(
+        gradient: _headerGradient,
+        borderRadius: BorderRadius.circular(24),
+        border: Border.all(color: borderColor),
+        boxShadow: [
+          BoxShadow(
+            color: accentColor.withOpacity(0.08),
+            blurRadius: 12,
+            offset: const Offset(0, 3),
+          ),
+        ],
+      ),
+      child: Row(
+        children: [
+          const Expanded(
+            flex: 2,
+            child: SizedBox(),
+          ),
+          Expanded(
+            flex: 5,
+            child: Align(
+              alignment: Alignment.centerRight,
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.end,
+                children: [
+                  Text(
+                    'شركة توزيع المنتجات النفطية',
+                    textAlign: TextAlign.right,
+                    style: TextStyle(
+                      fontSize: 18,
+                      fontWeight: FontWeight.w800,
+                      color: darkColor,
+                    ),
                   ),
-                ),
-                const SizedBox(height: 2),
-                Text(
-                  'فرع البصرة',
-                  textAlign: TextAlign.right,
-                  style: TextStyle(
-                    fontSize: 13,
-                    fontWeight: FontWeight.w700,
-                    color: darkColor,
+                  const SizedBox(height: 4),
+                  Text(
+                    'فرع البصرة',
+                    textAlign: TextAlign.right,
+                    style: TextStyle(
+                      fontSize: 16,
+                      fontWeight: FontWeight.w700,
+                      color: darkColor,
+                    ),
                   ),
-                ),
-                const SizedBox(height: 4),
-                Text(
-                  'القسم الاداري / شعبة الموارد البشرية /\nوحدة العقوبات',
-                  textAlign: TextAlign.right,
-                  style: TextStyle(
-                    fontSize: 11,
-                    color: softTextColor,
-                    height: 1.3,
-                    fontWeight: FontWeight.w600,
+                  const SizedBox(height: 6),
+                  Text(
+                    'القسم الاداري / شعبة الموارد البشرية /\nوحدة العقوبات',
+                    textAlign: TextAlign.right,
+                    style: TextStyle(
+                      fontSize: 13,
+                      color: softTextColor,
+                      height: 1.4,
+                      fontWeight: FontWeight.w600,
+                    ),
                   ),
-                ),
-              ],
+                ],
+              ),
             ),
           ),
-        ),
-      ],
-    ),
-  );
-}
+        ],
+      ),
+    );
+  }
+
   Widget _buildScannerDropdown() {
     if (_isLoadingScanners) {
       return Container(
-        padding: const EdgeInsets.all(10),
+        padding: const EdgeInsets.all(14),
         decoration: BoxDecoration(
-          color: Colors.white.withOpacity(0.72),
-          borderRadius: BorderRadius.circular(12),
+          color: Colors.white.withOpacity(0.85),
+          borderRadius: BorderRadius.circular(16),
           border: Border.all(color: borderColor),
         ),
         child: Row(
           children: [
             const SizedBox(
-              width: 14,
-              height: 14,
+              width: 18,
+              height: 18,
               child: CircularProgressIndicator(strokeWidth: 2),
             ),
-            const SizedBox(width: 8),
+            const SizedBox(width: 10),
             Text(
               'جاري تحميل أجهزة السكانر...',
-              style: TextStyle(color: softTextColor, fontSize: 11.4),
+              style: TextStyle(color: softTextColor, fontSize: 13.5),
             ),
           ],
         ),
@@ -902,23 +1366,23 @@ class _DocumentEntryScreenState extends State<DocumentEntryScreen> {
 
     if (_scannerNames.isEmpty) {
       return Container(
-        padding: const EdgeInsets.all(10),
+        padding: const EdgeInsets.all(14),
         decoration: BoxDecoration(
-          color: Colors.white.withOpacity(0.72),
-          borderRadius: BorderRadius.circular(12),
+          color: Colors.white.withOpacity(0.85),
+          borderRadius: BorderRadius.circular(16),
           border: Border.all(color: borderColor),
         ),
         child: Row(
           children: [
-            Icon(Icons.warning_amber_rounded, color: accentColor, size: 17),
-            const SizedBox(width: 8),
+            Icon(Icons.warning_amber_rounded, color: accentColor, size: 20),
+            const SizedBox(width: 10),
             Expanded(
               child: Text(
                 'لم يتم العثور على جهاز سكانر',
                 style: TextStyle(
                   color: softTextColor,
                   fontWeight: FontWeight.w600,
-                  fontSize: 11.4,
+                  fontSize: 13.5,
                 ),
               ),
             ),
@@ -932,14 +1396,14 @@ class _DocumentEntryScreenState extends State<DocumentEntryScreen> {
     }
 
     return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 0),
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 2),
       decoration: BoxDecoration(
-        color: Colors.white.withOpacity(0.72),
-        borderRadius: BorderRadius.circular(12),
+        color: Colors.white.withOpacity(0.85),
+        borderRadius: BorderRadius.circular(16),
         border: Border.all(color: borderColor),
         boxShadow: [
           BoxShadow(
-            color: Colors.black.withOpacity(0.02),
+            color: accentColor.withOpacity(0.04),
             blurRadius: 5,
             offset: const Offset(0, 1),
           ),
@@ -949,10 +1413,10 @@ class _DocumentEntryScreenState extends State<DocumentEntryScreen> {
         child: DropdownButton<int>(
           value: _selectedScannerIndex,
           isExpanded: true,
-          borderRadius: BorderRadius.circular(12),
+          borderRadius: BorderRadius.circular(16),
           style: TextStyle(
             color: darkColor,
-            fontSize: 12.4,
+            fontSize: 14.5,
             fontWeight: FontWeight.w600,
           ),
           items: List.generate(_scannerNames.length, (index) {
@@ -986,7 +1450,7 @@ class _DocumentEntryScreenState extends State<DocumentEntryScreen> {
             Text(
               'الصور المسحوبة',
               style: TextStyle(
-                fontSize: 13,
+                fontSize: 15,
                 fontWeight: FontWeight.w800,
                 color: darkColor,
               ),
@@ -994,37 +1458,37 @@ class _DocumentEntryScreenState extends State<DocumentEntryScreen> {
             const Spacer(),
             TextButton.icon(
               onPressed: _clearScannedImages,
-              icon: const Icon(Icons.delete_outline, size: 16),
+              icon: const Icon(Icons.delete_outline, size: 18),
               label: const Text('مسح الصور'),
             ),
           ],
         ),
-        const SizedBox(height: 6),
+        const SizedBox(height: 8),
         SizedBox(
-          height: 90,
+          height: 110,
           child: ListView.separated(
             scrollDirection: Axis.horizontal,
             itemCount: _scannedImagePaths.length,
-            separatorBuilder: (_, _) => const SizedBox(width: 6),
+            separatorBuilder: (_, _) => const SizedBox(width: 8),
             itemBuilder: (context, index) {
               final imagePath = _scannedImagePaths[index];
               final imageFile = File(imagePath);
 
               return Container(
-                width: 72,
+                width: 86,
                 decoration: BoxDecoration(
-                  borderRadius: BorderRadius.circular(10),
+                  borderRadius: BorderRadius.circular(12),
                   border: Border.all(color: borderColor),
                   boxShadow: [
                     BoxShadow(
-                      color: Colors.black.withOpacity(0.02),
+                      color: accentColor.withOpacity(0.03),
                       blurRadius: 4,
                       offset: const Offset(0, 1),
                     ),
                   ],
                 ),
                 child: ClipRRect(
-                  borderRadius: BorderRadius.circular(10),
+                  borderRadius: BorderRadius.circular(12),
                   child: imageFile.existsSync()
                       ? Image.file(imageFile, fit: BoxFit.cover)
                       : Container(
@@ -1051,26 +1515,26 @@ class _DocumentEntryScreenState extends State<DocumentEntryScreen> {
         'لا توجد صور متاحة للعرض',
         style: TextStyle(
           color: softTextColor,
-          fontSize: 11.2,
+          fontSize: 13,
         ),
       );
     }
 
     return SizedBox(
-      height: 76,
+      height: 92,
       child: ListView.separated(
         scrollDirection: Axis.horizontal,
         itemCount: validPaths.length,
-        separatorBuilder: (_, _) => const SizedBox(width: 6),
+        separatorBuilder: (_, _) => const SizedBox(width: 8),
         itemBuilder: (context, index) {
           return Container(
-            width: 60,
+            width: 76,
             decoration: BoxDecoration(
-              borderRadius: BorderRadius.circular(10),
+              borderRadius: BorderRadius.circular(12),
               border: Border.all(color: borderColor),
             ),
             child: ClipRRect(
-              borderRadius: BorderRadius.circular(10),
+              borderRadius: BorderRadius.circular(12),
               child: Image.file(
                 File(validPaths[index]),
                 fit: BoxFit.cover,
@@ -1088,37 +1552,58 @@ class _DocumentEntryScreenState extends State<DocumentEntryScreen> {
     required IconData icon,
     bool dark = false,
     bool loading = false,
-    double height = 34,
+    double height = 48,
   }) {
+    final gradient = dark
+        ? LinearGradient(
+            colors: [accentDarkColor, accentColor],
+            begin: Alignment.centerRight,
+            end: Alignment.centerLeft,
+          )
+        : _mainGradient;
+
     return SizedBox(
       width: double.infinity,
       height: height,
-      child: ElevatedButton.icon(
-        onPressed: onPressed,
-        style: ElevatedButton.styleFrom(
-          backgroundColor: dark ? darkColor : accentColor,
-          foregroundColor: Colors.white,
-          elevation: 0,
-          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 0),
-          shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(12),
-          ),
+      child: DecoratedBox(
+        decoration: BoxDecoration(
+          gradient: gradient,
+          borderRadius: BorderRadius.circular(16),
+          boxShadow: [
+            BoxShadow(
+              color: accentColor.withOpacity(0.22),
+              blurRadius: 10,
+              offset: const Offset(0, 4),
+            ),
+          ],
         ),
-        icon: loading
-            ? const SizedBox(
-                width: 13,
-                height: 13,
-                child: CircularProgressIndicator(
-                  color: Colors.white,
-                  strokeWidth: 2,
-                ),
-              )
-            : Icon(icon, size: 15),
-        label: Text(
-          label,
-          style: const TextStyle(
-            fontSize: 11.4,
-            fontWeight: FontWeight.w700,
+        child: ElevatedButton.icon(
+          onPressed: onPressed,
+          style: ElevatedButton.styleFrom(
+            backgroundColor: Colors.transparent,
+            shadowColor: Colors.transparent,
+            foregroundColor: Colors.white,
+            elevation: 0,
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(16),
+            ),
+          ),
+          icon: loading
+              ? const SizedBox(
+                  width: 16,
+                  height: 16,
+                  child: CircularProgressIndicator(
+                    color: Colors.white,
+                    strokeWidth: 2,
+                  ),
+                )
+              : Icon(icon, size: 18),
+          label: Text(
+            label,
+            style: const TextStyle(
+              fontSize: 14,
+              fontWeight: FontWeight.w700,
+            ),
           ),
         ),
       ),
@@ -1130,7 +1615,7 @@ class _DocumentEntryScreenState extends State<DocumentEntryScreen> {
     required String label,
     required IconData icon,
     bool loading = false,
-    double height = 34,
+    double height = 48,
   }) {
     return SizedBox(
       width: double.infinity,
@@ -1139,23 +1624,24 @@ class _DocumentEntryScreenState extends State<DocumentEntryScreen> {
         onPressed: onPressed,
         style: OutlinedButton.styleFrom(
           foregroundColor: darkColor,
+          backgroundColor: Colors.white.withOpacity(0.9),
           side: BorderSide(color: borderColor),
-          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 0),
+          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 0),
           shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(12),
+            borderRadius: BorderRadius.circular(16),
           ),
         ),
         icon: loading
             ? const SizedBox(
-                width: 13,
-                height: 13,
+                width: 16,
+                height: 16,
                 child: CircularProgressIndicator(strokeWidth: 2),
               )
-            : Icon(icon, size: 15),
+            : Icon(icon, size: 18),
         label: Text(
           label,
           style: const TextStyle(
-            fontSize: 11.2,
+            fontSize: 13.5,
             fontWeight: FontWeight.w700,
           ),
         ),
@@ -1165,33 +1651,22 @@ class _DocumentEntryScreenState extends State<DocumentEntryScreen> {
 
   Widget _buildSearchCard() {
     return Container(
-      padding: const EdgeInsets.all(12),
-      decoration: BoxDecoration(
-        color: cardColor,
-        borderRadius: BorderRadius.circular(18),
-        border: Border.all(color: borderColor),
-        boxShadow: [
-          BoxShadow(
-            color: Colors.black.withOpacity(0.03),
-            blurRadius: 8,
-            offset: const Offset(0, 3),
-          ),
-        ],
-      ),
+      padding: const EdgeInsets.all(16),
+      decoration: _cardDecoration(),
       child: Directionality(
         textDirection: ui.TextDirection.rtl,
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             _buildSectionTitle('البحث عن ملف', icon: Icons.search_rounded),
-            const SizedBox(height: 8),
+            const SizedBox(height: 10),
             _buildTextField(
               label: 'رقم الملف أو نص البحث',
               icon: Icons.manage_search_rounded,
               controller: _searchController,
               hint: 'مثال: 12345 أو كلمة من الملاحظات',
             ),
-            const SizedBox(height: 8),
+            const SizedBox(height: 10),
             Row(
               children: [
                 Expanded(
@@ -1200,16 +1675,14 @@ class _DocumentEntryScreenState extends State<DocumentEntryScreen> {
                     label: _isSearching ? 'جاري البحث...' : 'بحث',
                     icon: Icons.search,
                     loading: _isSearching,
-                    height: 34,
                   ),
                 ),
-                const SizedBox(width: 6),
+                const SizedBox(width: 8),
                 Expanded(
                   child: _buildOutlinedActionButton(
                     onPressed: _clearSearch,
                     label: 'مسح',
                     icon: Icons.close,
-                    height: 34,
                   ),
                 ),
               ],
@@ -1222,12 +1695,12 @@ class _DocumentEntryScreenState extends State<DocumentEntryScreen> {
 
   Widget _buildMiniInfoRow(String title, String value) {
     return Padding(
-      padding: const EdgeInsets.only(bottom: 5),
+      padding: const EdgeInsets.only(bottom: 7),
       child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 7),
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 10),
         decoration: BoxDecoration(
-          color: Colors.white.withOpacity(0.72),
-          borderRadius: BorderRadius.circular(10),
+          color: Colors.white.withOpacity(0.9),
+          borderRadius: BorderRadius.circular(12),
           border: Border.all(color: borderColor),
         ),
         child: Row(
@@ -1239,17 +1712,17 @@ class _DocumentEntryScreenState extends State<DocumentEntryScreen> {
                 style: TextStyle(
                   color: darkColor,
                   fontWeight: FontWeight.w600,
-                  fontSize: 11.2,
+                  fontSize: 13.2,
                 ),
               ),
             ),
-            const SizedBox(width: 6),
+            const SizedBox(width: 8),
             Text(
               '$title:',
               style: TextStyle(
                 color: softTextColor,
                 fontWeight: FontWeight.w700,
-                fontSize: 10.8,
+                fontSize: 12.3,
               ),
             ),
           ],
@@ -1262,19 +1735,8 @@ class _DocumentEntryScreenState extends State<DocumentEntryScreen> {
     final activeDocument = _searchedDocument ?? _savedDocument;
 
     return Container(
-      padding: const EdgeInsets.all(12),
-      decoration: BoxDecoration(
-        color: cardColor,
-        borderRadius: BorderRadius.circular(18),
-        border: Border.all(color: borderColor),
-        boxShadow: [
-          BoxShadow(
-            color: Colors.black.withOpacity(0.03),
-            blurRadius: 8,
-            offset: const Offset(0, 3),
-          ),
-        ],
-      ),
+      padding: const EdgeInsets.all(16),
+      decoration: _cardDecoration(),
       child: Directionality(
         textDirection: ui.TextDirection.rtl,
         child: activeDocument == null
@@ -1285,12 +1747,12 @@ class _DocumentEntryScreenState extends State<DocumentEntryScreen> {
                     'نتيجة البحث',
                     icon: Icons.assignment_outlined,
                   ),
-                  const SizedBox(height: 6),
+                  const SizedBox(height: 8),
                   Text(
                     'لم يتم العثور على أي ملف بعد.',
                     style: TextStyle(
                       color: softTextColor,
-                      fontSize: 11.2,
+                      fontSize: 13,
                     ),
                   ),
                 ],
@@ -1302,69 +1764,80 @@ class _DocumentEntryScreenState extends State<DocumentEntryScreen> {
                     'نتيجة البحث',
                     icon: Icons.assignment_outlined,
                   ),
-                  const SizedBox(height: 8),
+                  const SizedBox(height: 10),
                   _buildMiniInfoRow('رقم الملف', activeDocument.documentNumber),
                   _buildMiniInfoRow('تأريخ الملف', activeDocument.documentDate),
                   _buildMiniInfoRow('اسم الملف', activeDocument.documentTitle),
                   _buildMiniInfoRow('ملاحظات', activeDocument.notes),
+                  _buildMiniInfoRow('الحالة', activeDocument.status),
+                  _buildMiniInfoRow(
+                    'تاريخ التذكير',
+                    activeDocument.reminderDate ?? '',
+                  ),
                   _buildMiniInfoRow(
                     'عدد الصور',
-                    activeDocument.imagePaths.length.toString(),
+                    _scannedImagePaths.isNotEmpty
+                        ? _scannedImagePaths.length.toString()
+                        : activeDocument.imagePaths.length.toString(),
                   ),
                   _buildMiniInfoRow('مسار الفولدر', activeDocument.folderPath),
-                  const SizedBox(height: 6),
+                  const SizedBox(height: 8),
                   _buildActionButton(
-                    onPressed: () => _fillFormFromDocument(activeDocument),
+                    onPressed: () async {
+                      await _fillFormFromDocument(activeDocument);
+                    },
                     label: 'تعبئة الحقول',
                     icon: Icons.edit_note_outlined,
-                    height: 34,
                   ),
-                  const SizedBox(height: 6),
+                  const SizedBox(height: 8),
                   _buildActionButton(
                     onPressed: _isPrinting ? null : _printCurrentDocument,
                     label: _isPrinting ? 'جاري تجهيز الطباعة...' : 'طباعة الملف',
                     icon: Icons.print_outlined,
                     dark: true,
                     loading: _isPrinting,
-                    height: 34,
                   ),
-                  const SizedBox(height: 8),
+                  const SizedBox(height: 10),
                   Text(
                     'صور الملف',
                     style: TextStyle(
-                      fontSize: 12,
+                      fontSize: 14,
                       fontWeight: FontWeight.w800,
                       color: darkColor,
                     ),
                   ),
-                  const SizedBox(height: 5),
-                  _buildSavedImagesPreview(activeDocument.imagePaths),
+                  const SizedBox(height: 6),
+                  _buildSavedImagesPreview(
+                    _scannedImagePaths.isNotEmpty
+                        ? _scannedImagePaths
+                        : activeDocument.imagePaths,
+                  ),
                   if (_searchResults.length > 1) ...[
-                    const SizedBox(height: 8),
+                    const SizedBox(height: 10),
                     Text(
                       'نتائج إضافية (${_searchResults.length})',
                       style: TextStyle(
-                        fontSize: 11.2,
+                        fontSize: 13,
                         fontWeight: FontWeight.w700,
                         color: darkColor,
                       ),
                     ),
-                    const SizedBox(height: 5),
+                    const SizedBox(height: 6),
                     ..._searchResults.take(5).map(
                       (doc) => Padding(
-                        padding: const EdgeInsets.only(bottom: 4),
+                        padding: const EdgeInsets.only(bottom: 5),
                         child: InkWell(
-                          onTap: () {
+                          onTap: () async {
                             setState(() {
                               _searchedDocument = doc;
                             });
-                            _fillFormFromDocument(doc);
+                            await _fillFormFromDocument(doc);
                           },
                           child: Container(
-                            padding: const EdgeInsets.all(7),
+                            padding: const EdgeInsets.all(10),
                             decoration: BoxDecoration(
-                              color: Colors.white.withOpacity(0.72),
-                              borderRadius: BorderRadius.circular(10),
+                              color: Colors.white.withOpacity(0.88),
+                              borderRadius: BorderRadius.circular(12),
                               border: Border.all(color: borderColor),
                             ),
                             child: Text(
@@ -1372,7 +1845,7 @@ class _DocumentEntryScreenState extends State<DocumentEntryScreen> {
                               style: TextStyle(
                                 color: darkColor,
                                 fontWeight: FontWeight.w600,
-                                fontSize: 10.8,
+                                fontSize: 12.5,
                               ),
                             ),
                           ),
@@ -1391,65 +1864,52 @@ class _DocumentEntryScreenState extends State<DocumentEntryScreen> {
     required VoidCallback onTap,
   }) {
     return Material(
-      color: Colors.white.withOpacity(0.94),
-      borderRadius: BorderRadius.circular(8),
+      color: Colors.white.withOpacity(0.95),
+      borderRadius: BorderRadius.circular(10),
       elevation: 1,
       child: InkWell(
         onTap: onTap,
-        borderRadius: BorderRadius.circular(8),
+        borderRadius: BorderRadius.circular(10),
         child: Container(
-          width: 30,
-          height: 30,
+          width: 38,
+          height: 38,
           decoration: BoxDecoration(
-            borderRadius: BorderRadius.circular(8),
+            borderRadius: BorderRadius.circular(10),
             border: Border.all(color: borderColor),
           ),
           child: Icon(
             icon,
             color: darkColor,
-            size: 18,
+            size: 22,
           ),
         ),
       ),
     );
   }
 
-  Widget _buildLargePreviewCard({double height = 620}) {
+  Widget _buildLargePreviewCard({double? height}) {
     final hasImages = _scannedImagePaths.isNotEmpty;
     final currentImagePath = hasImages
-        ? _scannedImagePaths[_currentPreviewIndex.clamp(
-            0,
-            _scannedImagePaths.length - 1,
-          )]
+        ? _scannedImagePaths[
+            _currentPreviewIndex.clamp(0, _scannedImagePaths.length - 1)]
         : null;
 
     return Container(
       height: height,
-      padding: const EdgeInsets.all(12),
-      decoration: BoxDecoration(
-        color: cardColor,
-        borderRadius: BorderRadius.circular(18),
-        border: Border.all(color: borderColor),
-        boxShadow: [
-          BoxShadow(
-            color: Colors.black.withOpacity(0.04),
-            blurRadius: 10,
-            offset: const Offset(0, 4),
-          ),
-        ],
-      ),
+      padding: const EdgeInsets.all(16),
+      decoration: _cardDecoration(),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.end,
         children: [
           _buildSectionTitle('الصورة الكاملة', icon: Icons.image_outlined),
-          const SizedBox(height: 8),
+          const SizedBox(height: 10),
           Expanded(
             child: Container(
               width: double.infinity,
-              padding: const EdgeInsets.all(10),
+              padding: const EdgeInsets.all(12),
               decoration: BoxDecoration(
-                color: Colors.white.withOpacity(0.72),
-                borderRadius: BorderRadius.circular(14),
+                color: Colors.white.withOpacity(0.88),
+                borderRadius: BorderRadius.circular(16),
                 border: Border.all(color: borderColor),
               ),
               child: hasImages
@@ -1457,11 +1917,11 @@ class _DocumentEntryScreenState extends State<DocumentEntryScreen> {
                       alignment: Alignment.center,
                       children: [
                         ClipRRect(
-                          borderRadius: BorderRadius.circular(12),
+                          borderRadius: BorderRadius.circular(14),
                           child: File(currentImagePath!).existsSync()
                               ? Image.file(
                                   File(currentImagePath),
-                                  fit: BoxFit.fill,
+                                  fit: BoxFit.contain,
                                   width: double.infinity,
                                   height: double.infinity,
                                 )
@@ -1472,14 +1932,14 @@ class _DocumentEntryScreenState extends State<DocumentEntryScreen> {
                                   child: const Center(
                                     child: Icon(
                                       Icons.broken_image_outlined,
-                                      size: 34,
+                                      size: 40,
                                     ),
                                   ),
                                 ),
                         ),
                         if (_hasMultiplePreviewImages)
                           Positioned(
-                            right: 6,
+                            right: 10,
                             child: _buildPreviewNavigationButton(
                               icon: Icons.chevron_right_rounded,
                               onTap: _goToPreviousPreviewImage,
@@ -1487,7 +1947,7 @@ class _DocumentEntryScreenState extends State<DocumentEntryScreen> {
                           ),
                         if (_hasMultiplePreviewImages)
                           Positioned(
-                            left: 6,
+                            left: 10,
                             child: _buildPreviewNavigationButton(
                               icon: Icons.chevron_left_rounded,
                               onTap: _goToNextPreviewImage,
@@ -1501,26 +1961,26 @@ class _DocumentEntryScreenState extends State<DocumentEntryScreen> {
                         children: [
                           Icon(
                             Icons.image_outlined,
-                            size: 54,
+                            size: 70,
                             color: accentColor.withOpacity(0.75),
                           ),
-                          const SizedBox(height: 12),
+                          const SizedBox(height: 14),
                           Text(
                             'ستظهر الصورة الكاملة هنا',
                             textAlign: TextAlign.center,
                             style: TextStyle(
                               color: softTextColor,
-                              fontSize: 13.5,
+                              fontSize: 18,
                               fontWeight: FontWeight.w700,
                             ),
                           ),
-                          const SizedBox(height: 6),
+                          const SizedBox(height: 8),
                           Text(
                             'بعد السحب من السكانر أو تعبئة الحقول من نتيجة البحث',
                             textAlign: TextAlign.center,
                             style: TextStyle(
                               color: softTextColor,
-                              fontSize: 11.2,
+                              fontSize: 13,
                             ),
                           ),
                         ],
@@ -1528,14 +1988,74 @@ class _DocumentEntryScreenState extends State<DocumentEntryScreen> {
                     ),
             ),
           ),
-          const SizedBox(height: 8),
+          const SizedBox(height: 10),
+          if (hasImages)
+            Container(
+              width: double.infinity,
+              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 10),
+              decoration: BoxDecoration(
+                color: Colors.white.withOpacity(0.82),
+                borderRadius: BorderRadius.circular(14),
+                border: Border.all(color: borderColor),
+              ),
+              child: SizedBox(
+                height: 95,
+                child: ListView.separated(
+                  scrollDirection: Axis.horizontal,
+                  itemCount: _scannedImagePaths.length,
+                  separatorBuilder: (_, _) => const SizedBox(width: 8),
+                  itemBuilder: (context, index) {
+                    final imagePath = _scannedImagePaths[index];
+                    final imageFile = File(imagePath);
+                    final isSelected = index == _currentPreviewIndex;
+
+                    return GestureDetector(
+                      onTap: () {
+                        setState(() {
+                          _currentPreviewIndex = index;
+                        });
+                      },
+                      child: Container(
+                        width: 90,
+                        padding: const EdgeInsets.all(3),
+                        decoration: BoxDecoration(
+                          gradient:
+                              isSelected ? _mainGradient : null,
+                          color: isSelected ? null : Colors.transparent,
+                          borderRadius: BorderRadius.circular(12),
+                          border: Border.all(
+                            color: isSelected ? accentColor : borderColor,
+                            width: isSelected ? 2 : 1,
+                          ),
+                        ),
+                        child: ClipRRect(
+                          borderRadius: BorderRadius.circular(10),
+                          child: imageFile.existsSync()
+                              ? Image.file(
+                                  imageFile,
+                                  fit: BoxFit.cover,
+                                )
+                              : Container(
+                                  color: Colors.grey.shade200,
+                                  child: const Center(
+                                    child: Icon(Icons.broken_image_outlined),
+                                  ),
+                                ),
+                        ),
+                      ),
+                    );
+                  },
+                ),
+              ),
+            ),
+          const SizedBox(height: 10),
           Container(
             width: double.infinity,
-            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
             decoration: BoxDecoration(
-              color: accentColor.withOpacity(0.14),
-              borderRadius: BorderRadius.circular(10),
-              border: Border.all(color: accentColor.withOpacity(0.28)),
+              gradient: _headerGradient,
+              borderRadius: BorderRadius.circular(12),
+              border: Border.all(color: borderColor),
             ),
             child: Column(
               children: [
@@ -1543,17 +2063,17 @@ class _DocumentEntryScreenState extends State<DocumentEntryScreen> {
                   'عدد الصفحات: ${_scannedImagePaths.length}',
                   style: TextStyle(
                     color: darkColor,
-                    fontSize: 11.2,
+                    fontSize: 13,
                     fontWeight: FontWeight.w700,
                   ),
                 ),
                 if (_hasMultiplePreviewImages) ...[
-                  const SizedBox(height: 2),
+                  const SizedBox(height: 4),
                   Text(
                     'الصفحة ${_currentPreviewIndex + 1} من ${_scannedImagePaths.length}',
                     style: TextStyle(
                       color: softTextColor,
-                      fontSize: 10.4,
+                      fontSize: 12,
                       fontWeight: FontWeight.w600,
                     ),
                   ),
@@ -1566,21 +2086,126 @@ class _DocumentEntryScreenState extends State<DocumentEntryScreen> {
     );
   }
 
-  Widget _buildInfoCard() {
+  Widget _buildDocumentTypeSwitcher() {
     return Container(
-      padding: const EdgeInsets.all(10),
+      padding: const EdgeInsets.all(7),
       decoration: BoxDecoration(
-        color: cardColor,
-        borderRadius: BorderRadius.circular(18),
+        color: Colors.white.withOpacity(0.88),
+        borderRadius: BorderRadius.circular(16),
         border: Border.all(color: borderColor),
-        boxShadow: [
-          BoxShadow(
-            color: Colors.black.withOpacity(0.03),
-            blurRadius: 8,
-            offset: const Offset(0, 3),
+      ),
+      child: Row(
+        children: [
+          Expanded(
+            child: _buildTypeChip(
+              title: 'ملف رئيسي',
+              selected: !_isSubDocument,
+              onTap: () {
+                setState(() {
+                  _isSubDocument = false;
+                });
+              },
+            ),
+          ),
+          const SizedBox(width: 8),
+          Expanded(
+            child: _buildTypeChip(
+              title: 'كتاب تابع',
+              selected: _isSubDocument,
+              onTap: () {
+                setState(() {
+                  _isSubDocument = true;
+                  if (_documentNumberController.text.trim().isNotEmpty &&
+                      _parentDocumentNumberController.text.trim().isEmpty) {
+                    _parentDocumentNumberController.text =
+                        _documentNumberController.text.trim();
+                  }
+                });
+              },
+            ),
           ),
         ],
       ),
+    );
+  }
+
+  Widget _buildTypeChip({
+    required String title,
+    required bool selected,
+    required VoidCallback onTap,
+  }) {
+    return Material(
+      color: Colors.transparent,
+      borderRadius: BorderRadius.circular(12),
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(12),
+        child: Ink(
+          height: 46,
+          decoration: BoxDecoration(
+            gradient: selected ? _mainGradient : null,
+            color: selected ? null : Colors.transparent,
+            borderRadius: BorderRadius.circular(12),
+          ),
+          child: Center(
+            child: Text(
+              title,
+              style: TextStyle(
+                color: selected ? Colors.white : darkColor,
+                fontWeight: FontWeight.w700,
+                fontSize: 13.5,
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildStatusDropdown() {
+    const statuses = ['منجز', 'قيد الإنجاز', 'تم الاطلاع'];
+
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 2),
+      decoration: BoxDecoration(
+        color: Colors.white.withOpacity(0.88),
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: borderColor),
+      ),
+      child: DropdownButtonHideUnderline(
+        child: DropdownButton<String>(
+          value: _selectedStatus,
+          isExpanded: true,
+          borderRadius: BorderRadius.circular(16),
+          style: TextStyle(
+            color: darkColor,
+            fontSize: 14.5,
+            fontWeight: FontWeight.w600,
+          ),
+          items: statuses.map((status) {
+            return DropdownMenuItem<String>(
+              value: status,
+              child: Text(
+                status,
+                textAlign: TextAlign.right,
+              ),
+            );
+          }).toList(),
+          onChanged: (value) {
+            if (value == null) return;
+            setState(() {
+              _selectedStatus = value;
+            });
+          },
+        ),
+      ),
+    );
+  }
+
+  Widget _buildInfoCard() {
+    return Container(
+      padding: const EdgeInsets.all(16),
+      decoration: _cardDecoration(),
       child: Directionality(
         textDirection: ui.TextDirection.rtl,
         child: Column(
@@ -1590,18 +2215,20 @@ class _DocumentEntryScreenState extends State<DocumentEntryScreen> {
               'بيانات الملف',
               icon: Icons.folder_copy_outlined,
             ),
-            const SizedBox(height: 5),
+            const SizedBox(height: 6),
             Text(
               'اسحب الملف من جهاز السكانر ثم أدخل البيانات الأساسية.',
               style: TextStyle(
                 color: softTextColor,
-                height: 1.3,
-                fontSize: 10.8,
+                height: 1.4,
+                fontSize: 12.5,
               ),
             ),
-            const SizedBox(height: 8),
+            const SizedBox(height: 10),
+            _buildDocumentTypeSwitcher(),
+            const SizedBox(height: 10),
             _buildScannerDropdown(),
-            const SizedBox(height: 6),
+            const SizedBox(height: 8),
             Row(
               children: [
                 Expanded(
@@ -1610,10 +2237,10 @@ class _DocumentEntryScreenState extends State<DocumentEntryScreen> {
                     label: _isScanning ? 'جاري الانتظار...' : 'سحب من السكانر',
                     icon: Icons.document_scanner_outlined,
                     loading: _isScanning,
-                    height: 32,
+                    height: 46,
                   ),
                 ),
-                const SizedBox(width: 6),
+                const SizedBox(width: 8),
                 Expanded(
                   child: _buildOutlinedActionButton(
                     onPressed: _isImportingTempImages
@@ -1624,30 +2251,53 @@ class _DocumentEntryScreenState extends State<DocumentEntryScreen> {
                         : 'تحميل الصور',
                     icon: Icons.folder_open_outlined,
                     loading: _isImportingTempImages,
-                    height: 32,
+                    height: 46,
                   ),
                 ),
               ],
             ),
             if (_scannedImagePaths.isNotEmpty) ...[
-              const SizedBox(height: 7),
+              const SizedBox(height: 10),
               _buildScannedImagesPreview(),
             ],
-            const SizedBox(height: 7),
+            const SizedBox(height: 10),
+            if (_isSubDocument) ...[
+              Row(
+                children: [
+                  Expanded(
+                    child: _buildTextField(
+                      label: 'رقم الملف الأصلي',
+                      icon: Icons.account_tree_outlined,
+                      controller: _parentDocumentNumberController,
+                      hint: 'مثال: 1001',
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: _buildTextField(
+                      label: 'رقم الكتاب التابع',
+                      icon: Icons.subdirectory_arrow_left_outlined,
+                      controller: _subDocumentNumberController,
+                      hint: 'مثال: 55',
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 8),
+            ] else ...[
+              _buildTextField(
+                label: 'رقم الملف',
+                icon: Icons.numbers_rounded,
+                controller: _documentNumberController,
+                hint: '12345',
+              ),
+              const SizedBox(height: 8),
+            ],
             Row(
               children: [
                 Expanded(
                   child: _buildTextField(
-                    label: 'رقم الملف',
-                    icon: Icons.numbers_rounded,
-                    controller: _documentNumberController,
-                    hint: '12345',
-                  ),
-                ),
-                const SizedBox(width: 6),
-                Expanded(
-                  child: _buildTextField(
-                    label: 'تأريخ الملف',
+                    label: _isSubDocument ? 'تأريخ الكتاب' : 'تأريخ الملف',
                     icon: Icons.calendar_month_outlined,
                     controller: _documentDateController,
                     hint: 'اختر التاريخ',
@@ -1655,22 +2305,50 @@ class _DocumentEntryScreenState extends State<DocumentEntryScreen> {
                     onTap: _pickDate,
                   ),
                 ),
+                if (!_isSubDocument) ...[
+                  const SizedBox(width: 8),
+                  Expanded(child: _buildStatusDropdown()),
+                ],
               ],
             ),
-            const SizedBox(height: 6),
+            const SizedBox(height: 8),
             _buildTextField(
-              label: 'اسم الملف',
+              label: _isSubDocument ? 'اسم الكتاب التابع' : 'اسم الملف',
               icon: Icons.description_outlined,
               controller: _documentTitleController,
-              hint: 'اكتب اسم الملف',
+              hint: _isSubDocument ? 'اكتب اسم الكتاب التابع' : 'اكتب اسم الملف',
             ),
-            const SizedBox(height: 6),
+            const SizedBox(height: 8),
             _buildTextField(
               label: 'ملاحظات',
               icon: Icons.sticky_note_2_outlined,
               controller: _notesController,
               hint: 'أدخل أي ملاحظات إضافية',
-              maxLines: 2,
+              maxLines: 3,
+            ),
+            const SizedBox(height: 8),
+            Row(
+              children: [
+                Expanded(
+                  child: _buildTextField(
+                    label: 'تاريخ التذكير',
+                    icon: Icons.alarm_outlined,
+                    controller: _reminderDateController,
+                    hint: 'اختر تاريخ التذكير',
+                    readOnly: true,
+                    onTap: _pickReminderDate,
+                  ),
+                ),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: _buildTextField(
+                    label: 'ملاحظة التذكير',
+                    icon: Icons.notification_important_outlined,
+                    controller: _reminderNoteController,
+                    hint: 'مثال: متابعة الكتاب',
+                  ),
+                ),
+              ],
             ),
           ],
         ),
@@ -1680,62 +2358,85 @@ class _DocumentEntryScreenState extends State<DocumentEntryScreen> {
 
   Widget _buildBottomSaveBar() {
     return Container(
-      padding: const EdgeInsets.all(8),
-      decoration: BoxDecoration(
-        color: cardColor,
-        borderRadius: BorderRadius.circular(18),
-        border: Border.all(color: borderColor),
-        boxShadow: [
-          BoxShadow(
-            color: Colors.black.withOpacity(0.03),
-            blurRadius: 8,
-            offset: const Offset(0, 3),
-          ),
-        ],
-      ),
+      padding: const EdgeInsets.all(10),
+      decoration: _cardDecoration(),
       child: _buildActionButton(
         onPressed: _isLoading ? null : _saveDocument,
         label: _isLoading ? 'جاري الحفظ...' : 'حفظ',
         icon: Icons.save_outlined,
         dark: true,
         loading: _isLoading,
-        height: 34,
+        height: 50,
       ),
     );
   }
 
-  Widget _buildRightColumn() {
-    return Column(
+  Widget _buildRightColumn({required bool scrollableInside}) {
+    final content = Column(
       children: [
         _buildTopHeaderCompact(),
-        const SizedBox(height: 10),
+        const SizedBox(height: 12),
+
+        _buildActionButton(
+          onPressed: () async {
+            final result = await Navigator.push(
+              context,
+              MaterialPageRoute(
+                builder: (_) => const DocumentsByStatusScreen(),
+              ),
+            );
+
+            if (result != null) {
+              await _fillFormFromDocument(
+                _documentFromJson(result),
+              );
+            }
+          },
+          label: 'عرض الملفات',
+          icon: Icons.folder_open,
+        ),
+
+        const SizedBox(height: 12),
         _buildSearchCard(),
-        const SizedBox(height: 10),
+        const SizedBox(height: 12),
         _buildResultCard(),
-        const SizedBox(height: 10),
+        const SizedBox(height: 12),
         _buildInfoCard(),
-        const SizedBox(height: 8),
+        const SizedBox(height: 10),
         _buildBottomSaveBar(),
       ],
     );
+
+    if (!scrollableInside) return content;
+
+    return SingleChildScrollView(
+      child: content,
+    );
   }
 
-  Widget _buildWideLayout() {
-    return Directionality(
-      textDirection: ui.TextDirection.ltr,
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Expanded(
-            flex: 5,
-            child: _buildLargePreviewCard(height: 690),
-          ),
-          const SizedBox(width: 12),
-          Expanded(
-            flex: 3,
-            child: _buildRightColumn(),
-          ),
-        ],
+  Widget _buildWideLayout(BoxConstraints constraints) {
+    final availableHeight = constraints.maxHeight > 0
+        ? constraints.maxHeight
+        : MediaQuery.of(context).size.height;
+
+    return SizedBox(
+      height: availableHeight,
+      child: Directionality(
+        textDirection: ui.TextDirection.ltr,
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Expanded(
+              flex: 7,
+              child: _buildLargePreviewCard(),
+            ),
+            const SizedBox(width: 14),
+            Expanded(
+              flex: 5,
+              child: _buildRightColumn(scrollableInside: true),
+            ),
+          ],
+        ),
       ),
     );
   }
@@ -1744,15 +2445,37 @@ class _DocumentEntryScreenState extends State<DocumentEntryScreen> {
     return Column(
       children: [
         _buildTopHeaderCompact(),
-        const SizedBox(height: 10),
+        const SizedBox(height: 12),
+        _buildActionButton(
+          onPressed: () async {
+            final result = await Navigator.push(
+              context,
+              MaterialPageRoute(
+                builder: (_) => const DocumentsByStatusScreen(),
+              ),
+            );
+
+            if (result != null) {
+              await _fillFormFromDocument(
+                _documentFromJson(result),
+              );
+            }
+          },
+          label: 'عرض الملفات',
+          icon: Icons.folder_open,
+        ),
+        const SizedBox(height: 12),
         _buildSearchCard(),
-        const SizedBox(height: 10),
+        const SizedBox(height: 12),
         _buildResultCard(),
-        const SizedBox(height: 10),
+        const SizedBox(height: 12),
         _buildInfoCard(),
+        const SizedBox(height: 12),
+        SizedBox(
+          height: 520,
+          child: _buildLargePreviewCard(),
+        ),
         const SizedBox(height: 10),
-        _buildLargePreviewCard(height: 460),
-        const SizedBox(height: 8),
         _buildBottomSaveBar(),
       ],
     );
@@ -1765,6 +2488,10 @@ class _DocumentEntryScreenState extends State<DocumentEntryScreen> {
     _documentTitleController.dispose();
     _notesController.dispose();
     _searchController.dispose();
+    _parentDocumentNumberController.dispose();
+    _subDocumentNumberController.dispose();
+    _reminderDateController.dispose();
+    _reminderNoteController.dispose();
     super.dispose();
   }
 
@@ -1775,22 +2502,33 @@ class _DocumentEntryScreenState extends State<DocumentEntryScreen> {
       child: Scaffold(
         backgroundColor: bgColor,
         body: SafeArea(
-          child: Container(
-            margin: const EdgeInsets.all(8),
-            padding: const EdgeInsets.all(10),
-            decoration: BoxDecoration(
-              color: shellColor.withOpacity(0.52),
-              borderRadius: BorderRadius.circular(18),
-            ),
-            child: LayoutBuilder(
-              builder: (context, constraints) {
-                final isWide = constraints.maxWidth > 1100;
+          child: LayoutBuilder(
+            builder: (context, constraints) {
+              final isWide = constraints.maxWidth > 1100;
 
-                return SingleChildScrollView(
-                  child: isWide ? _buildWideLayout() : _buildNarrowLayout(),
-                );
-              },
-            ),
+              return Container(
+                width: double.infinity,
+                height: double.infinity,
+                margin: const EdgeInsets.all(10),
+                padding: const EdgeInsets.all(14),
+                decoration: BoxDecoration(
+                  gradient: const LinearGradient(
+                    colors: [
+                      Color(0xFFE9F7FF),
+                      Color(0xFFD4ECFF),
+                    ],
+                    begin: Alignment.topRight,
+                    end: Alignment.bottomLeft,
+                  ),
+                  borderRadius: BorderRadius.circular(22),
+                ),
+                child: isWide
+                    ? _buildWideLayout(constraints)
+                    : SingleChildScrollView(
+                        child: _buildNarrowLayout(),
+                      ),
+              );
+            },
           ),
         ),
       ),
