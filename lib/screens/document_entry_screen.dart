@@ -57,6 +57,7 @@ class _DocumentEntryScreenState extends State<DocumentEntryScreen> {
   bool _isImportingTempImages = false;
   bool _isPrinting = false;
   bool _isLoadingReminders = false;
+  bool _isRefreshingApp = false;
 
   bool _isSubDocument = false;
   String _selectedStatus = 'قيد الإنجاز';
@@ -64,6 +65,7 @@ class _DocumentEntryScreenState extends State<DocumentEntryScreen> {
   DocumentModel? _savedDocument;
   DocumentModel? _searchedDocument;
   List<DocumentModel> _searchResults = [];
+  List<DocumentModel> _searchedAttachments = [];
   List<DocumentModel> _dueReminders = [];
 
   final Color bgColor = const Color(0xFFEAF6FF);
@@ -227,6 +229,7 @@ class _DocumentEntryScreenState extends State<DocumentEntryScreen> {
     setState(() {
       _searchedDocument = doc;
       _savedDocument = null;
+      _searchedAttachments = [];
     });
 
     await _fillFormFromDocument(doc);
@@ -850,6 +853,28 @@ class _DocumentEntryScreenState extends State<DocumentEntryScreen> {
     );
   }
 
+  DocumentModel _attachmentFromJson(Map<String, dynamic> map) {
+    final rawImagePaths = map['image_paths'];
+
+    List<String> imagePaths = [];
+    if (rawImagePaths is List) {
+      imagePaths = rawImagePaths.map((e) => e.toString()).toList();
+    }
+
+    return DocumentModel(
+      id: map['id'] is int ? map['id'] : int.tryParse('${map['id']}'),
+      documentNumber: (map['sub_document_number'] ?? '').toString(),
+      documentDate: (map['sub_document_date'] ?? '').toString(),
+      documentTitle: (map['sub_document_title'] ?? '').toString(),
+      notes: (map['notes'] ?? '').toString(),
+      status: 'كتاب تابع',
+      reminderDate: map['reminder_date']?.toString(),
+      reminderNote: map['reminder_note']?.toString(),
+      folderPath: (map['folder_path'] ?? '').toString(),
+      imagePaths: imagePaths,
+    );
+  }
+
   Future<List<DocumentModel>> _fetchAllDocumentsFromApi() async {
     final uri = Uri.parse('$_apiBaseUrl/get_documents.php');
     final response = await http.get(uri);
@@ -870,11 +895,11 @@ class _DocumentEntryScreenState extends State<DocumentEntryScreen> {
         .toList();
   }
 
-  Future<DocumentModel?> _fetchDocumentByNumberFromApi(
+  Future<Map<String, dynamic>?> _fetchDocumentWithAttachmentsFromApi(
     String documentNumber,
   ) async {
-    final uri = Uri.parse(
-      '$_apiBaseUrl/get_document_by_number.php?document_number=$documentNumber',
+    final uri = Uri.parse('$_apiBaseUrl/get_document_by_number.php').replace(
+      queryParameters: {'document_number': documentNumber},
     );
 
     final response = await http.get(uri);
@@ -886,10 +911,33 @@ class _DocumentEntryScreenState extends State<DocumentEntryScreen> {
     final data = jsonDecode(response.body);
 
     if (data['success'] == true && data['document'] != null) {
-      return _documentFromJson(Map<String, dynamic>.from(data['document']));
+      final document = _documentFromJson(
+        Map<String, dynamic>.from(data['document']),
+      );
+
+      final List attachmentsJson = data['attachments'] ?? [];
+      final attachments = attachmentsJson
+          .map(
+            (item) => _attachmentFromJson(
+              Map<String, dynamic>.from(item),
+            ),
+          )
+          .toList();
+
+      return {
+        'document': document,
+        'attachments': attachments,
+      };
     }
 
     return null;
+  }
+
+  Future<DocumentModel?> _fetchDocumentByNumberFromApi(
+    String documentNumber,
+  ) async {
+    final result = await _fetchDocumentWithAttachmentsFromApi(documentNumber);
+    return result?['document'] as DocumentModel?;
   }
 
   Future<void> _insertDocumentToApi(DocumentModel document) async {
@@ -1060,20 +1108,31 @@ class _DocumentEntryScreenState extends State<DocumentEntryScreen> {
     });
 
     try {
-      final exactDocument = await _fetchDocumentByNumberFromApi(query);
+      final exactData = await _fetchDocumentWithAttachmentsFromApi(query);
+      final exactDocument = exactData?['document'] as DocumentModel?;
+      final exactAttachments =
+          (exactData?['attachments'] as List<DocumentModel>?) ?? [];
+
       final results = await _searchDocumentsInApi(query);
+      final selectedDocument =
+          exactDocument ?? (results.isNotEmpty ? results.first : null);
 
       setState(() {
-        _searchedDocument =
-            exactDocument ?? (results.isNotEmpty ? results.first : null);
+        _searchedDocument = selectedDocument;
+        _savedDocument = null;
         _searchResults = results;
+        _searchedAttachments = exactDocument != null ? exactAttachments : [];
       });
 
       if (_searchedDocument == null) {
         _showMessage('لم يتم العثور على نتيجة', isError: true);
       } else {
         await _fillFormFromDocument(_searchedDocument!);
-        _showMessage('تم العثور على ${results.length} نتيجة');
+        _showMessage(
+          _searchedAttachments.isEmpty
+              ? 'تم العثور على الملف'
+              : 'تم العثور على الملف ومعه ${_searchedAttachments.length} كتاب تابع',
+        );
       }
     } catch (e) {
       _showMessage('حدث خطأ أثناء البحث: $e', isError: true);
@@ -1090,10 +1149,80 @@ class _DocumentEntryScreenState extends State<DocumentEntryScreen> {
     setState(() {
       _searchController.clear();
       _searchedDocument = null;
+      _savedDocument = null;
       _searchResults = [];
+      _searchedAttachments = [];
       _scannedImagePaths = [];
       _currentPreviewIndex = 0;
+      _isSubDocument = false;
+      _selectedStatus = 'قيد الإنجاز';
+
+      _documentNumberController.clear();
+      _documentDateController.clear();
+      _documentTitleController.clear();
+      _notesController.clear();
+      _parentDocumentNumberController.clear();
+      _subDocumentNumberController.clear();
+      _reminderDateController.clear();
+      _reminderNoteController.clear();
     });
+
+    _showMessage('تم مسح نتيجة البحث');
+  }
+
+  Future<void> _refreshApp() async {
+    if (_isRefreshingApp) return;
+
+    setState(() {
+      _isRefreshingApp = true;
+    });
+
+    try {
+      // تنظيف حالة الصفحة بالكامل مثل فتح التطبيق من جديد
+      _searchController.clear();
+      _searchedDocument = null;
+      _savedDocument = null;
+      _searchResults = [];
+      _searchedAttachments = [];
+      _scannedImagePaths = [];
+      _currentPreviewIndex = 0;
+      _isSubDocument = false;
+      _selectedStatus = 'قيد الإنجاز';
+
+      _documentNumberController.clear();
+      _documentDateController.clear();
+      _documentTitleController.clear();
+      _notesController.clear();
+      _parentDocumentNumberController.clear();
+      _subDocumentNumberController.clear();
+      _reminderDateController.clear();
+      _reminderNoteController.clear();
+
+      // إغلاق أي عملية Canon معلقة حتى لا يبقى السكانر محجوزاً
+      await _closeCanonScannerProcesses();
+
+      // تنظيف مجلد السحب المؤقت من صور قديمة
+      await _clearTempFolder();
+
+      // إعادة تهيئة المجلدات والسكانر والتنبيهات
+      await _ensureArchiveRootExists();
+      await _ensureTempFolderExists();
+      await _loadScanners();
+      await _loadDueReminders();
+
+      if (!mounted) return;
+
+      _showMessage('تم تحديث وتنظيف التطبيق بنجاح');
+    } catch (e) {
+      if (!mounted) return;
+      _showMessage('حدث خطأ أثناء تحديث التطبيق: $e', isError: true);
+    } finally {
+      if (mounted) {
+        setState(() {
+          _isRefreshingApp = false;
+        });
+      }
+    }
   }
 
   Future<void> _fillFormFromDocument(DocumentModel document) async {
@@ -1352,6 +1481,7 @@ class _DocumentEntryScreenState extends State<DocumentEntryScreen> {
           _savedDocument = attachmentPreview;
           _searchedDocument = null;
           _searchResults = [];
+          _searchedAttachments = [];
           _scannedImagePaths = movedImages;
           _currentPreviewIndex = 0;
         });
@@ -1408,6 +1538,7 @@ class _DocumentEntryScreenState extends State<DocumentEntryScreen> {
           _savedDocument = document;
           _searchedDocument = null;
           _searchResults = [];
+          _searchedAttachments = [];
           _scannedImagePaths = movedImages;
           _currentPreviewIndex = 0;
         });
@@ -1655,56 +1786,85 @@ class _DocumentEntryScreenState extends State<DocumentEntryScreen> {
       child: Row(
         children: [
           SizedBox(
-            width: 64,
-            child: Stack(
-              clipBehavior: Clip.none,
+            width: 118,
+            child: Row(
               children: [
+                Stack(
+                  clipBehavior: Clip.none,
+                  children: [
+                    IconButton(
+                      tooltip: 'التنبيهات',
+                      onPressed:
+                          _isLoadingReminders ? null : _openRemindersDialog,
+                      style: IconButton.styleFrom(
+                        backgroundColor: Colors.white.withOpacity(0.92),
+                        foregroundColor: accentColor,
+                        padding: const EdgeInsets.all(12),
+                      ),
+                      icon: _isLoadingReminders
+                          ? const SizedBox(
+                              width: 20,
+                              height: 20,
+                              child: CircularProgressIndicator(strokeWidth: 2),
+                            )
+                          : const Icon(
+                              Icons.notifications_none_rounded,
+                              size: 26,
+                            ),
+                    ),
+                    if (_dueReminders.isNotEmpty)
+                      Positioned(
+                        right: -2,
+                        top: -2,
+                        child: Container(
+                          constraints: const BoxConstraints(
+                            minWidth: 22,
+                            minHeight: 22,
+                          ),
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 5,
+                            vertical: 2,
+                          ),
+                          decoration: BoxDecoration(
+                            color: Colors.red.shade700,
+                            borderRadius: BorderRadius.circular(20),
+                            border: Border.all(
+                              color: Colors.white,
+                              width: 1.5,
+                            ),
+                          ),
+                          child: Text(
+                            _dueReminders.length > 99
+                                ? '99+'
+                                : '${_dueReminders.length}',
+                            textAlign: TextAlign.center,
+                            style: const TextStyle(
+                              color: Colors.white,
+                              fontSize: 10.5,
+                              fontWeight: FontWeight.w800,
+                            ),
+                          ),
+                        ),
+                      ),
+                  ],
+                ),
+                const SizedBox(width: 8),
                 IconButton(
-                  onPressed: _isLoadingReminders ? null : _openRemindersDialog,
+                  tooltip: 'تحديث وتنظيف التطبيق',
+                  onPressed: _isRefreshingApp ? null : _refreshApp,
                   style: IconButton.styleFrom(
                     backgroundColor: Colors.white.withOpacity(0.92),
                     foregroundColor: accentColor,
                     padding: const EdgeInsets.all(12),
                   ),
-                  icon: _isLoadingReminders
+                  icon: _isRefreshingApp
                       ? const SizedBox(
                           width: 20,
                           height: 20,
                           child: CircularProgressIndicator(strokeWidth: 2),
                         )
-                      : const Icon(Icons.notifications_none_rounded, size: 26),
+                      : const Icon(Icons.refresh_rounded, size: 26),
                 ),
-                if (_dueReminders.isNotEmpty)
-                  Positioned(
-                    right: -2,
-                    top: -2,
-                    child: Container(
-                      constraints: const BoxConstraints(
-                        minWidth: 22,
-                        minHeight: 22,
-                      ),
-                      padding: const EdgeInsets.symmetric(
-                        horizontal: 5,
-                        vertical: 2,
-                      ),
-                      decoration: BoxDecoration(
-                        color: Colors.red.shade700,
-                        borderRadius: BorderRadius.circular(20),
-                        border: Border.all(color: Colors.white, width: 1.5),
-                      ),
-                      child: Text(
-                        _dueReminders.length > 99
-                            ? '99+'
-                            : '${_dueReminders.length}',
-                        textAlign: TextAlign.center,
-                        style: const TextStyle(
-                          color: Colors.white,
-                          fontSize: 10.5,
-                          fontWeight: FontWeight.w800,
-                        ),
-                      ),
-                    ),
-                  ),
               ],
             ),
           ),
@@ -2147,6 +2307,100 @@ class _DocumentEntryScreenState extends State<DocumentEntryScreen> {
     );
   }
 
+  Widget _buildAttachmentCard(DocumentModel attachment) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 8),
+      child: InkWell(
+        onTap: () async {
+          setState(() {
+            _searchedDocument = attachment;
+            _savedDocument = null;
+          });
+          await _fillFormFromDocument(attachment);
+        },
+        borderRadius: BorderRadius.circular(14),
+        child: Container(
+          padding: const EdgeInsets.all(12),
+          decoration: BoxDecoration(
+            color: Colors.white.withOpacity(0.9),
+            borderRadius: BorderRadius.circular(14),
+            border: Border.all(color: borderColor),
+            boxShadow: [
+              BoxShadow(
+                color: accentColor.withOpacity(0.04),
+                blurRadius: 5,
+                offset: const Offset(0, 2),
+              ),
+            ],
+          ),
+          child: Row(
+            children: [
+              Container(
+                width: 42,
+                height: 42,
+                decoration: BoxDecoration(
+                  gradient: _mainGradient,
+                  borderRadius: BorderRadius.circular(12),
+                ),
+                child: const Icon(
+                  Icons.attach_file_rounded,
+                  color: Colors.white,
+                  size: 22,
+                ),
+              ),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.end,
+                  children: [
+                    Text(
+                      'كتاب تابع رقم ${attachment.documentNumber}',
+                      textAlign: TextAlign.right,
+                      style: TextStyle(
+                        color: darkColor,
+                        fontWeight: FontWeight.w800,
+                        fontSize: 13.5,
+                      ),
+                    ),
+                    const SizedBox(height: 4),
+                    Text(
+                      attachment.documentTitle.isEmpty
+                          ? 'بدون عنوان'
+                          : attachment.documentTitle,
+                      textAlign: TextAlign.right,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        color: softTextColor,
+                        fontWeight: FontWeight.w600,
+                        fontSize: 12.5,
+                      ),
+                    ),
+                    const SizedBox(height: 4),
+                    Text(
+                      'التأريخ: ${attachment.documentDate.isEmpty ? '-' : attachment.documentDate}',
+                      textAlign: TextAlign.right,
+                      style: TextStyle(
+                        color: softTextColor,
+                        fontSize: 12,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(width: 8),
+              Icon(
+                Icons.chevron_left_rounded,
+                color: accentColor,
+                size: 24,
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
   Widget _buildResultCard() {
     final activeDocument = _searchedDocument ?? _savedDocument;
 
@@ -2228,6 +2482,19 @@ class _DocumentEntryScreenState extends State<DocumentEntryScreen> {
                         ? _scannedImagePaths
                         : activeDocument.imagePaths,
                   ),
+                  if (_searchedAttachments.isNotEmpty) ...[
+                    const SizedBox(height: 12),
+                    Text(
+                      'الكتب التابعة داخل هذا الملف (${_searchedAttachments.length})',
+                      style: TextStyle(
+                        fontSize: 14,
+                        fontWeight: FontWeight.w800,
+                        color: darkColor,
+                      ),
+                    ),
+                    const SizedBox(height: 8),
+                    ..._searchedAttachments.map(_buildAttachmentCard),
+                  ],
                   if (_searchResults.length > 1) ...[
                     const SizedBox(height: 10),
                     Text(
@@ -2244,8 +2511,16 @@ class _DocumentEntryScreenState extends State<DocumentEntryScreen> {
                         padding: const EdgeInsets.only(bottom: 5),
                         child: InkWell(
                           onTap: () async {
+                            final exactData = await _fetchDocumentWithAttachmentsFromApi(
+                              doc.documentNumber,
+                            );
+                            final attachments =
+                                (exactData?['attachments'] as List<DocumentModel>?) ?? [];
+
                             setState(() {
                               _searchedDocument = doc;
+                              _savedDocument = null;
+                              _searchedAttachments = attachments;
                             });
                             await _fillFormFromDocument(doc);
                           },
