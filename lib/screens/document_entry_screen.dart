@@ -40,7 +40,7 @@ class _DocumentEntryScreenState extends State<DocumentEntryScreen> {
 
   final ScannerService _scannerService = ScannerService();
 
-  static const String _archiveRootPath = r'F:\DocumentArchive';
+  static const String _archiveRootPath = r'D:\DocumentArchive';
   static const String _tempFolderPath = r'C:\ScannedTemp';
   static const String _scannerExePath =
       r'C:\Program Files (x86)\Canon Electronics\CaptureOnTouch\TouchDR.exe';
@@ -56,6 +56,7 @@ class _DocumentEntryScreenState extends State<DocumentEntryScreen> {
   bool _isSearching = false;
   bool _isImportingTempImages = false;
   bool _isPrinting = false;
+  bool _isLoadingReminders = false;
 
   bool _isSubDocument = false;
   String _selectedStatus = 'قيد الإنجاز';
@@ -63,6 +64,7 @@ class _DocumentEntryScreenState extends State<DocumentEntryScreen> {
   DocumentModel? _savedDocument;
   DocumentModel? _searchedDocument;
   List<DocumentModel> _searchResults = [];
+  List<DocumentModel> _dueReminders = [];
 
   final Color bgColor = const Color(0xFFEAF6FF);
   final Color shellColor = const Color(0xFFD6ECFF);
@@ -114,8 +116,8 @@ class _DocumentEntryScreenState extends State<DocumentEntryScreen> {
     _ensureArchiveRootExists();
     _ensureTempFolderExists();
 
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      _checkTodayReminders();
+    WidgetsBinding.instance.addPostFrameCallback((_) async {
+      await _loadDueReminders(showDialogAfterLoad: true);
     });
   }
 
@@ -158,131 +160,324 @@ class _DocumentEntryScreenState extends State<DocumentEntryScreen> {
         '${date.day.toString().padLeft(2, '0')}';
   }
 
-  Future<void> _checkTodayReminders() async {
+  bool _isReminderDue(String? reminderDateStr) {
+    if (reminderDateStr == null || reminderDateStr.trim().isEmpty) {
+      return false;
+    }
+
+    final reminderDate = DateTime.tryParse(reminderDateStr.trim());
+    if (reminderDate == null) {
+      return false;
+    }
+
+    final today = DateTime.now();
+    final todayOnly = DateTime(today.year, today.month, today.day);
+    final reminderOnly =
+        DateTime(reminderDate.year, reminderDate.month, reminderDate.day);
+
+    return !reminderOnly.isAfter(todayOnly);
+  }
+
+  Future<void> _loadDueReminders({bool showDialogAfterLoad = false}) async {
+    setState(() {
+      _isLoadingReminders = true;
+    });
+
     try {
-      final uri = Uri.parse('$_apiBaseUrl/get_documents.php');
-      final response = await http.get(uri);
+      final allDocuments = await _fetchAllDocumentsFromApi();
 
-      if (response.statusCode != 200) return;
+      final dueReminders = allDocuments.where((doc) {
+        return _isReminderDue(doc.reminderDate);
+      }).toList();
 
-      final data = jsonDecode(response.body);
+      dueReminders.sort((a, b) {
+        final aDate = DateTime.tryParse(a.reminderDate ?? '') ??
+            DateTime(2100, 1, 1);
+        final bDate = DateTime.tryParse(b.reminderDate ?? '') ??
+            DateTime(2100, 1, 1);
+        return aDate.compareTo(bDate);
+      });
 
-      if (data['success'] != true || data['documents'] == null) return;
+      if (!mounted) return;
 
-      final List docs = data['documents'];
-      final today = DateTime.now();
-      final todayOnly = DateTime(today.year, today.month, today.day);
+      setState(() {
+        _dueReminders = dueReminders;
+      });
 
-      final dueReminders = docs.where((item) {
-        final map = Map<String, dynamic>.from(item);
-        final reminderDateStr = (map['reminder_date'] ?? '').toString().trim();
+      if (showDialogAfterLoad && dueReminders.isNotEmpty) {
+        _openRemindersDialog();
+      }
+    } catch (_) {
+      if (!mounted) return;
+      setState(() {
+        _dueReminders = [];
+      });
+    } finally {
+      if (mounted) {
+        setState(() {
+          _isLoadingReminders = false;
+        });
+      }
+    }
+  }
 
-        if (reminderDateStr.isEmpty) return false;
+  Future<void> _openReminderDetails(DocumentModel doc) async {
+    Navigator.of(context).pop();
 
-        final reminderDate = DateTime.tryParse(reminderDateStr);
-        if (reminderDate == null) return false;
+    setState(() {
+      _searchedDocument = doc;
+      _savedDocument = null;
+    });
 
-        final reminderOnly =
-            DateTime(reminderDate.year, reminderDate.month, reminderDate.day);
+    await _fillFormFromDocument(doc);
 
-        return !reminderOnly.isAfter(todayOnly);
-      }).map((e) => Map<String, dynamic>.from(e)).toList();
+    _showMessage('تم فتح تفاصيل الملف ${doc.documentNumber}');
+  }
 
-      if (dueReminders.isEmpty || !mounted) return;
-
-      await showDialog(
-        context: context,
-        builder: (_) => AlertDialog(
-          backgroundColor: cardColor,
-          title: const Text(
-            'التذكيرات المستحقة',
-            textAlign: TextAlign.right,
+  void _openRemindersDialog() {
+    showDialog(
+      context: context,
+      builder: (_) => Dialog(
+        backgroundColor: Colors.transparent,
+        child: Container(
+          width: 620,
+          constraints: const BoxConstraints(maxHeight: 560),
+          padding: const EdgeInsets.all(16),
+          decoration: BoxDecoration(
+            gradient: _softGradient,
+            borderRadius: BorderRadius.circular(24),
+            border: Border.all(color: borderColor),
+            boxShadow: [
+              BoxShadow(
+                color: accentColor.withOpacity(0.12),
+                blurRadius: 18,
+                offset: const Offset(0, 6),
+              ),
+            ],
           ),
-          content: SizedBox(
-            width: 520,
-            child: SingleChildScrollView(
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: dueReminders.map((item) {
-                  final recordType = (item['record_type'] ?? 'main').toString();
-                  final documentNumber =
-                      (item['document_number'] ?? '').toString();
-                  final documentTitle =
-                      (item['document_title'] ?? '').toString();
-                  final reminderDate =
-                      (item['reminder_date'] ?? '').toString();
-                  final reminderNote =
-                      (item['reminder_note'] ?? '').toString();
-
-                  final typeLabel =
-                      recordType == 'attachment' ? 'كتاب تابع' : 'ملف رئيسي';
-
-                  return Container(
-                    margin: const EdgeInsets.only(bottom: 10),
-                    padding: const EdgeInsets.all(12),
-                    decoration: BoxDecoration(
-                      gradient: _softGradient,
-                      borderRadius: BorderRadius.circular(14),
-                      border: Border.all(color: borderColor),
+          child: Directionality(
+            textDirection: ui.TextDirection.rtl,
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: [
+                    Container(
+                      width: 44,
+                      height: 44,
+                      decoration: BoxDecoration(
+                        gradient: _mainGradient,
+                        borderRadius: BorderRadius.circular(14),
+                      ),
+                      child: const Icon(
+                        Icons.notifications_active_outlined,
+                        color: Colors.white,
+                      ),
                     ),
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.end,
-                      children: [
-                        Text(
-                          '$typeLabel - $documentNumber',
-                          textAlign: TextAlign.right,
-                          style: TextStyle(
-                            color: darkColor,
-                            fontWeight: FontWeight.w800,
-                            fontSize: 14,
-                          ),
+                    const SizedBox(width: 10),
+                    Expanded(
+                      child: Text(
+                        'لوحة التنبيهات',
+                        style: TextStyle(
+                          color: darkColor,
+                          fontSize: 20,
+                          fontWeight: FontWeight.w800,
                         ),
-                        const SizedBox(height: 6),
-                        Text(
-                          documentTitle,
-                          textAlign: TextAlign.right,
-                          style: TextStyle(
-                            color: darkColor,
-                            fontWeight: FontWeight.w600,
-                            fontSize: 13,
-                          ),
-                        ),
-                        const SizedBox(height: 4),
-                        Text(
-                          'تاريخ التذكير: $reminderDate',
-                          textAlign: TextAlign.right,
-                          style: TextStyle(
-                            color: softTextColor,
-                            fontSize: 12.5,
-                          ),
-                        ),
-                        if (reminderNote.isNotEmpty) ...[
-                          const SizedBox(height: 4),
-                          Text(
-                            'ملاحظة: $reminderNote',
-                            textAlign: TextAlign.right,
+                      ),
+                    ),
+                    IconButton(
+                      onPressed: () => Navigator.pop(context),
+                      icon: Icon(Icons.close_rounded, color: darkColor),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 6),
+                Text(
+                  _dueReminders.isEmpty
+                      ? 'لا توجد تذكيرات مستحقة حاليًا'
+                      : 'عدد التذكيرات المستحقة: ${_dueReminders.length}',
+                  style: TextStyle(
+                    color: softTextColor,
+                    fontSize: 13.5,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+                const SizedBox(height: 14),
+                Expanded(
+                  child: _dueReminders.isEmpty
+                      ? Center(
+                          child: Text(
+                            'لا توجد تنبيهات حاليًا',
                             style: TextStyle(
                               color: softTextColor,
-                              fontSize: 12.5,
+                              fontSize: 15,
+                              fontWeight: FontWeight.w600,
                             ),
                           ),
-                        ],
-                      ],
+                        )
+                      : ListView.separated(
+                          itemCount: _dueReminders.length,
+                          separatorBuilder: (_, _) =>
+                              const SizedBox(height: 10),
+                          itemBuilder: (context, index) {
+                            final doc = _dueReminders[index];
+                            final isAttachment =
+                                doc.status.trim() == 'كتاب تابع';
+
+                            return InkWell(
+                              onTap: () => _openReminderDetails(doc),
+                              borderRadius: BorderRadius.circular(18),
+                              child: Container(
+                                padding: const EdgeInsets.all(14),
+                                decoration: BoxDecoration(
+                                  color: Colors.white.withOpacity(0.92),
+                                  borderRadius: BorderRadius.circular(18),
+                                  border: Border.all(color: borderColor),
+                                  boxShadow: [
+                                    BoxShadow(
+                                      color: accentColor.withOpacity(0.05),
+                                      blurRadius: 6,
+                                      offset: const Offset(0, 2),
+                                    ),
+                                  ],
+                                ),
+                                child: Row(
+                                  children: [
+                                    Container(
+                                      width: 48,
+                                      height: 48,
+                                      decoration: BoxDecoration(
+                                        gradient: _mainGradient,
+                                        borderRadius: BorderRadius.circular(14),
+                                      ),
+                                      child: Icon(
+                                        isAttachment
+                                            ? Icons.attach_file_rounded
+                                            : Icons.folder_copy_outlined,
+                                        color: Colors.white,
+                                      ),
+                                    ),
+                                    const SizedBox(width: 12),
+                                    Expanded(
+                                      child: Column(
+                                        crossAxisAlignment:
+                                            CrossAxisAlignment.end,
+                                        children: [
+                                          Text(
+                                            'ملف رقم ${doc.documentNumber}',
+                                            textAlign: TextAlign.right,
+                                            style: TextStyle(
+                                              color: darkColor,
+                                              fontSize: 14.5,
+                                              fontWeight: FontWeight.w800,
+                                            ),
+                                          ),
+                                          const SizedBox(height: 4),
+                                          Text(
+                                            doc.documentTitle,
+                                            textAlign: TextAlign.right,
+                                            style: TextStyle(
+                                              color: darkColor,
+                                              fontSize: 13.5,
+                                              fontWeight: FontWeight.w600,
+                                            ),
+                                          ),
+                                          if ((doc.reminderNote ?? '')
+                                              .trim()
+                                              .isNotEmpty) ...[
+                                            const SizedBox(height: 4),
+                                            Text(
+                                              doc.reminderNote!,
+                                              textAlign: TextAlign.right,
+                                              style: TextStyle(
+                                                color: softTextColor,
+                                                fontSize: 12.5,
+                                              ),
+                                            ),
+                                          ],
+                                        ],
+                                      ),
+                                    ),
+                                    const SizedBox(width: 10),
+                                    Column(
+                                      crossAxisAlignment:
+                                          CrossAxisAlignment.end,
+                                      children: [
+                                        Container(
+                                          padding: const EdgeInsets.symmetric(
+                                            horizontal: 10,
+                                            vertical: 6,
+                                          ),
+                                          decoration: BoxDecoration(
+                                            color: const Color(0xFFEFF7FF),
+                                            borderRadius:
+                                                BorderRadius.circular(12),
+                                            border: Border.all(
+                                              color: borderColor,
+                                            ),
+                                          ),
+                                          child: Text(
+                                            doc.reminderDate ?? '-',
+                                            style: TextStyle(
+                                              color: accentDarkColor,
+                                              fontSize: 12,
+                                              fontWeight: FontWeight.w700,
+                                            ),
+                                          ),
+                                        ),
+                                        const SizedBox(height: 8),
+                                        Text(
+                                          'فتح التفاصيل',
+                                          style: TextStyle(
+                                            color: accentColor,
+                                            fontSize: 12,
+                                            fontWeight: FontWeight.w700,
+                                          ),
+                                        ),
+                                      ],
+                                    ),
+                                  ],
+                                ),
+                              ),
+                            );
+                          },
+                        ),
+                ),
+                const SizedBox(height: 12),
+                Row(
+                  children: [
+                    Expanded(
+                      child: _buildOutlinedActionButton(
+                        onPressed: _isLoadingReminders
+                            ? null
+                            : () async {
+                                Navigator.pop(context);
+                                await _loadDueReminders();
+                                _openRemindersDialog();
+                              },
+                        label: _isLoadingReminders
+                            ? 'جاري التحديث...'
+                            : 'تحديث التنبيهات',
+                        icon: Icons.refresh_rounded,
+                        loading: _isLoadingReminders,
+                      ),
                     ),
-                  );
-                }).toList(),
-              ),
+                    const SizedBox(width: 10),
+                    Expanded(
+                      child: _buildActionButton(
+                        onPressed: () => Navigator.pop(context),
+                        label: 'إغلاق',
+                        icon: Icons.check_rounded,
+                      ),
+                    ),
+                  ],
+                ),
+              ],
             ),
           ),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.pop(context),
-              child: const Text('إغلاق'),
-            ),
-          ],
         ),
-      );
-    } catch (_) {}
+      ),
+    );
   }
 
   Future<List<String>> _getScannedFilesFromTempFolder() async {
@@ -345,25 +540,13 @@ class _DocumentEntryScreenState extends State<DocumentEntryScreen> {
   }
 
   Future<void> _loadScanners() async {
+    // مهم: لا نستخدم TWAIN هنا حتى لا يمسك درايفر السكانر ويمنع برنامج Canon من السحب.
+    // السحب الفعلي يتم عن طريق تشغيل برنامج CaptureOnTouch فقط.
     setState(() {
-      _isLoadingScanners = true;
+      _isLoadingScanners = false;
+      _scannerNames = ['Canon CaptureOnTouch'];
+      _selectedScannerIndex = 0;
     });
-
-    try {
-      final scanners = await _scannerService.getAvailableScanners();
-      setState(() {
-        _scannerNames = scanners;
-        _selectedScannerIndex = scanners.isNotEmpty ? 0 : null;
-      });
-    } catch (e) {
-      _showMessage('تعذر تحميل أجهزة السكانر: $e', isError: true);
-    } finally {
-      if (mounted) {
-        setState(() {
-          _isLoadingScanners = false;
-        });
-      }
-    }
   }
 
   Future<void> _loadScannedImagesFromFolder({bool showMessage = true}) async {
@@ -397,6 +580,93 @@ class _DocumentEntryScreenState extends State<DocumentEntryScreen> {
     }
   }
 
+  Future<void> _runWindowsCommand(String command) async {
+    if (!Platform.isWindows) return;
+
+    try {
+      await Process.run(
+        'cmd',
+        ['/c', command],
+        runInShell: true,
+      );
+    } catch (_) {}
+  }
+
+  Future<void> _closeCanonScannerProcesses() async {
+    // نغلق كل العمليات المحتملة الخاصة ببرنامج Canon/CaptureOnTouch
+    // حتى لا يبقى درايفر ISIS محجوز وتظهر رسالة Error:80FD1131.
+    if (!Platform.isWindows) return;
+
+    final processNames = <String>[
+      'TouchDR.exe',
+      'TouchDR2.exe',
+      'CaptureOnTouch.exe',
+      'CaptureOnTouchV5Pro.exe',
+      'COT.exe',
+      'COTMgr.exe',
+      'DRScanner.exe',
+      'DRScannerService.exe',
+    ];
+
+    for (final processName in processNames) {
+      await _runWindowsCommand('taskkill /F /T /IM "$processName"');
+    }
+
+    // احتياط إضافي: نغلق أي عملية اسمها يحتوي CaptureOnTouch أو TouchDR فقط.
+    // هذا لا يغيّر تصميم التطبيق، فقط يحرر الدرايفر قبل السحبة التالية.
+    try {
+      await Process.run(
+        'powershell',
+        [
+          '-NoProfile',
+          '-ExecutionPolicy',
+          'Bypass',
+          '-Command',
+          r"Get-Process | Where-Object { $_.ProcessName -like '*TouchDR*' -or $_.ProcessName -like '*CaptureOnTouch*' -or $_.ProcessName -like '*COT*' -or $_.ProcessName -like '*DRScanner*' } | Stop-Process -Force -ErrorAction SilentlyContinue",
+        ],
+        runInShell: true,
+      );
+    } catch (_) {}
+
+    // ننتظر قليلاً لأن درايفر ISIS يحتاج ثواني حتى يتحرر بعد إغلاق البرنامج.
+    await Future.delayed(const Duration(seconds: 3));
+  }
+
+  Future<void> _startCanonScannerProgram() async {
+    final scannerExe = File(_scannerExePath);
+
+    if (!await scannerExe.exists()) {
+      throw Exception(
+        'تعذر العثور على برنامج السكانر في المسار:\n$_scannerExePath',
+      );
+    }
+
+    await Process.start(
+      _scannerExePath,
+      [],
+      mode: ProcessStartMode.detached,
+      runInShell: true,
+    );
+
+    // نمهل برنامج Canon حتى يفتح ويتعرف على السكانر قبل أي إجراء آخر.
+    await Future.delayed(const Duration(seconds: 4));
+  }
+
+  Future<bool> _waitAndLoadScannedImages() async {
+    for (int i = 0; i < 20; i++) {
+      final files = await _getScannedFilesFromTempFolder();
+
+      if (files.isNotEmpty) {
+        _setPreviewImages(files);
+        return true;
+      }
+
+      await Future.delayed(const Duration(seconds: 1));
+    }
+
+    return false;
+  }
+
   Future<void> _startScanAndImport() async {
     setState(() {
       _isScanning = true;
@@ -406,39 +676,44 @@ class _DocumentEntryScreenState extends State<DocumentEntryScreen> {
 
     try {
       await _ensureTempFolderExists();
+
+      // قبل كل سحب: نغلق أي نسخة قديمة من Canon وننتظر تحرير درايفر ISIS.
+      await _closeCanonScannerProcesses();
+
+      // نفرغ مجلد السحب المؤقت حتى لا يقرأ التطبيق صوراً قديمة.
       await _clearTempFolder();
 
-      final scannerExe = File(_scannerExePath);
-      if (!await scannerExe.exists()) {
-        _showMessage(
-          'تعذر العثور على برنامج السكانر في المسار المحدد',
-          isError: true,
-        );
-        return;
-      }
-
-      await Process.start(
-        _scannerExePath,
-        [],
-        mode: ProcessStartMode.detached,
-      );
+      // نفتح برنامج Canon من جديد كجلسة نظيفة.
+      await _startCanonScannerProgram();
 
       if (!mounted) return;
 
-      await showDialog(
+      final bool? scanCompleted = await showDialog<bool>(
         context: context,
         barrierDismissible: false,
         builder: (_) => AlertDialog(
           backgroundColor: cardColor,
           title: const Text('تنفيذ السحب'),
           content: const Text(
-            'تم فتح برنامج Canon.\n'
-            'اسحبي الأوراق من برنامج السكانر، وبعد اكتمال السحب اضغطي "تم السحب".',
+            'تم فتح برنامج Canon.\n\n'
+            '1- اسحب الأوراق من برنامج Canon.\n'
+            '2- بعد انتهاء السحب اضغط Finish داخل برنامج Canon.\n'
+            '3- انتظر ثانيتين، ثم ارجع للتطبيق واضغط "تم السحب".\n\n'
+            'إذا حدث خلل في جهاز السكانر أو أُلغيت العملية، اضغط "إلغاء / خروج" حتى يغلق التطبيق برنامج Canon ويحرر درايفر ISIS.\n\n'
+            'التطبيق سيغلق برنامج Canon بعد تحميل الصور حتى لا يبقى درايفر ISIS محجوزاً للسحبة القادمة.',
             textAlign: TextAlign.right,
           ),
           actions: [
             TextButton(
-              onPressed: () => Navigator.pop(context),
+              onPressed: () {
+                Navigator.pop(context, false);
+              },
+              child: const Text('إلغاء / خروج'),
+            ),
+            TextButton(
+              onPressed: () {
+                Navigator.pop(context, true);
+              },
               child: const Text('تم السحب'),
             ),
           ],
@@ -447,27 +722,38 @@ class _DocumentEntryScreenState extends State<DocumentEntryScreen> {
 
       if (!mounted) return;
 
-      bool loaded = false;
+      if (scanCompleted != true) {
+        await _closeCanonScannerProcesses();
 
-      for (int i = 0; i < 10; i++) {
-        final files = await _getScannedFilesFromTempFolder();
+        if (!mounted) return;
 
-        if (files.isNotEmpty) {
-          _setPreviewImages(files);
-          loaded = true;
-          break;
-        }
+        setState(() {
+          _scannedImagePaths = [];
+          _currentPreviewIndex = 0;
+        });
 
-        await Future.delayed(const Duration(seconds: 1));
+        _showMessage('تم إلغاء عملية السحب');
+        return;
       }
+      if (!mounted) return;
+
+      // بعد الضغط على تم السحب نحمّل الصور أولاً.
+      final loaded = await _waitAndLoadScannedImages();
+
+      // ثم نغلق Canon وننتظر حتى يتحرر الدرايفر للمرة القادمة.
+      await _closeCanonScannerProcesses();
 
       if (!loaded) {
-        _showMessage('لم يتم العثور على صور جديدة بعد السحب', isError: true);
+        _showMessage(
+          'لم يتم العثور على صور جديدة بعد السحب. تأكدي أن برنامج Canon يحفظ الصور داخل C:\\ScannedTemp',
+          isError: true,
+        );
         return;
       }
 
       _showMessage('تم تحميل ${_scannedImagePaths.length} صورة بنجاح');
     } catch (e) {
+      await _closeCanonScannerProcesses();
       _showMessage('حدث خطأ أثناء تشغيل السكانر: $e', isError: true);
     } finally {
       if (mounted) {
@@ -910,6 +1196,11 @@ class _DocumentEntryScreenState extends State<DocumentEntryScreen> {
     required List<String> scannedFiles,
     required String targetFolderPath,
   }) async {
+    final targetDir = Directory(targetFolderPath);
+    if (!await targetDir.exists()) {
+      await targetDir.create(recursive: true);
+    }
+
     final List<String> movedPaths = [];
     int nextIndex = await _getNextImageIndex(targetFolderPath);
 
@@ -917,13 +1208,29 @@ class _DocumentEntryScreenState extends State<DocumentEntryScreen> {
       final oldFile = File(oldPath);
 
       if (!await oldFile.exists()) continue;
+      if (!_isImageFile(oldPath)) continue;
 
-      final extension = p.extension(oldPath).toLowerCase();
+      final extension = p.extension(oldPath).toLowerCase().isEmpty
+          ? '.jpg'
+          : p.extension(oldPath).toLowerCase();
       final newPath = p.join(targetFolderPath, '$nextIndex$extension');
       final newFile = File(newPath);
 
+      // إذا كانت الصورة أصلاً داخل فولدر الهدف، لا نحذفها ولا ننسخها فوق نفسها.
+      if (p.normalize(oldFile.path).toLowerCase() ==
+          p.normalize(newFile.path).toLowerCase()) {
+        movedPaths.add(oldFile.path);
+        nextIndex++;
+        continue;
+      }
+
       await oldFile.copy(newPath);
-      await oldFile.delete();
+
+      // الصور المسحوبة تكون عادة داخل C:\ScannedTemp، لذلك نحذفها بعد نسخها للأرشيف.
+      // إذا كان الملف من مكان آخر ومقفول، نتجاهل فشل الحذف حتى لا يتوقف الحفظ.
+      try {
+        await oldFile.delete();
+      } catch (_) {}
 
       movedPaths.add(newFile.path);
       nextIndex++;
@@ -979,12 +1286,19 @@ class _DocumentEntryScreenState extends State<DocumentEntryScreen> {
     });
 
     try {
-      if (_isSubDocument) {
-        final parentDocument =
-            await _fetchDocumentByNumberFromApi(parentDocumentNumber);
+      await _ensureArchiveRootExists();
 
-        if (parentDocument == null) {
-          _showMessage('الملف الأصلي غير موجود', isError: true);
+      if (_isSubDocument) {
+        // الكتاب التابع يعتمد على وجود فولدر الملف الأصلي داخل D:\DocumentArchive
+        // حتى لو لم يكن الملف الأصلي موجوداً داخل قاعدة البيانات.
+        final parentFolderPath = p.join(_archiveRootPath, parentDocumentNumber);
+        final parentFolder = Directory(parentFolderPath);
+
+        if (!await parentFolder.exists()) {
+          _showMessage(
+            'الملف الأصلي غير موجود داخل D:\\DocumentArchive\nتأكدي أن رقم الملف الأصلي مطابق لاسم الفولدر بالضبط',
+            isError: true,
+          );
           return;
         }
 
@@ -1002,28 +1316,55 @@ class _DocumentEntryScreenState extends State<DocumentEntryScreen> {
           throw Exception('لم يتم نقل الصور إلى فولدر الكتاب التابع');
         }
 
-        await _insertAttachmentToApi(
-          parentDocumentNumber: parentDocumentNumber,
-          subDocumentNumber: subDocumentNumber,
-          subDocumentDate: documentDate,
-          subDocumentTitle: documentTitle,
+        bool apiSaved = true;
+        try {
+          await _insertAttachmentToApi(
+            parentDocumentNumber: parentDocumentNumber,
+            subDocumentNumber: subDocumentNumber,
+            subDocumentDate: documentDate,
+            subDocumentTitle: documentTitle,
+            notes: notes,
+            reminderDate: reminderDate.isEmpty ? null : reminderDate,
+            reminderNote: reminderNote.isEmpty ? null : reminderNote,
+            folderPath: folderPath,
+            imagePaths: movedImages,
+          );
+        } catch (_) {
+          // لا نلغي حفظ الصور إذا كانت قاعدة البيانات لا تحتوي الملف الأصلي.
+          // المهم أن الكتاب التابع صار محفوظاً داخل فولدر الملف الأصلي على D.
+          apiSaved = false;
+        }
+
+        final attachmentPreview = DocumentModel(
+          id: null,
+          documentNumber: subDocumentNumber,
+          documentDate: documentDate,
+          documentTitle: documentTitle,
           notes: notes,
+          status: 'كتاب تابع',
           reminderDate: reminderDate.isEmpty ? null : reminderDate,
           reminderNote: reminderNote.isEmpty ? null : reminderNote,
           folderPath: folderPath,
           imagePaths: movedImages,
         );
 
-        _showMessage('تم حفظ الكتاب التابع داخل الملف الأصلي بنجاح');
+        setState(() {
+          _savedDocument = attachmentPreview;
+          _searchedDocument = null;
+          _searchResults = [];
+          _scannedImagePaths = movedImages;
+          _currentPreviewIndex = 0;
+        });
+
+        _showMessage(
+          apiSaved
+              ? 'تم حفظ الكتاب التابع داخل الملف الأصلي بنجاح'
+              : 'تم حفظ الكتاب التابع داخل فولدر الملف الأصلي على D، لكن لم يتم تسجيله في قاعدة البيانات',
+          isError: !apiSaved,
+        );
       } else {
-        final existingDocument =
-            await _fetchDocumentByNumberFromApi(documentNumber);
-
-        if (existingDocument != null) {
-          _showMessage('هذا الملف موجود مسبقاً', isError: true);
-          return;
-        }
-
+        // الملف الرئيسي: ننشئ فولدر باسم رقم الملف داخل D:\DocumentArchive
+        // ونضع الصور داخل original. إذا كان الفولدر موجوداً نضيف الصور بتسلسل جديد.
         final folderPath = await _createMainDocumentFolder(documentNumber);
 
         final movedImages = await _moveScannedFilesToDocumentFolder(
@@ -1048,17 +1389,42 @@ class _DocumentEntryScreenState extends State<DocumentEntryScreen> {
           imagePaths: movedImages,
         );
 
-        await _insertDocumentToApi(document);
+        bool apiSaved = true;
+        try {
+          final existingDocument = await _fetchDocumentByNumberFromApi(documentNumber);
 
-        _showMessage('تم حفظ الملف الرئيسي في قاعدة البيانات بنجاح');
+          if (existingDocument == null) {
+            await _insertDocumentToApi(document);
+          } else {
+            // إذا كان موجوداً بقاعدة البيانات، لا نوقف الحفظ لأن الصور انحفظت فعلاً بالفولدر.
+            apiSaved = false;
+          }
+        } catch (_) {
+          // حتى لو تعطلت قاعدة البيانات، لا نخسر حفظ الصور على D.
+          apiSaved = false;
+        }
+
+        setState(() {
+          _savedDocument = document;
+          _searchedDocument = null;
+          _searchResults = [];
+          _scannedImagePaths = movedImages;
+          _currentPreviewIndex = 0;
+        });
+
+        _showMessage(
+          apiSaved
+              ? 'تم حفظ الملف الرئيسي داخل D وقاعدة البيانات بنجاح'
+              : 'تم حفظ الملف الرئيسي داخل D، لكن لم يتم تسجيله في قاعدة البيانات',
+          isError: !apiSaved,
+        );
       }
 
+      try {
+        await _loadDueReminders();
+      } catch (_) {}
+
       setState(() {
-        _savedDocument = null;
-        _searchedDocument = null;
-        _searchResults = [];
-        _scannedImagePaths = [];
-        _currentPreviewIndex = 0;
         _selectedStatus = 'قيد الإنجاز';
         _isSubDocument = false;
       });
@@ -1288,12 +1654,62 @@ class _DocumentEntryScreenState extends State<DocumentEntryScreen> {
       ),
       child: Row(
         children: [
-          const Expanded(
-            flex: 2,
-            child: SizedBox(),
+          SizedBox(
+            width: 64,
+            child: Stack(
+              clipBehavior: Clip.none,
+              children: [
+                IconButton(
+                  onPressed: _isLoadingReminders ? null : _openRemindersDialog,
+                  style: IconButton.styleFrom(
+                    backgroundColor: Colors.white.withOpacity(0.92),
+                    foregroundColor: accentColor,
+                    padding: const EdgeInsets.all(12),
+                  ),
+                  icon: _isLoadingReminders
+                      ? const SizedBox(
+                          width: 20,
+                          height: 20,
+                          child: CircularProgressIndicator(strokeWidth: 2),
+                        )
+                      : const Icon(Icons.notifications_none_rounded, size: 26),
+                ),
+                if (_dueReminders.isNotEmpty)
+                  Positioned(
+                    right: -2,
+                    top: -2,
+                    child: Container(
+                      constraints: const BoxConstraints(
+                        minWidth: 22,
+                        minHeight: 22,
+                      ),
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 5,
+                        vertical: 2,
+                      ),
+                      decoration: BoxDecoration(
+                        color: Colors.red.shade700,
+                        borderRadius: BorderRadius.circular(20),
+                        border: Border.all(color: Colors.white, width: 1.5),
+                      ),
+                      child: Text(
+                        _dueReminders.length > 99
+                            ? '99+'
+                            : '${_dueReminders.length}',
+                        textAlign: TextAlign.center,
+                        style: const TextStyle(
+                          color: Colors.white,
+                          fontSize: 10.5,
+                          fontWeight: FontWeight.w800,
+                        ),
+                      ),
+                    ),
+                  ),
+              ],
+            ),
           ),
+          const SizedBox(width: 10),
           Expanded(
-            flex: 5,
             child: Align(
               alignment: Alignment.centerRight,
               child: Column(
@@ -2019,8 +2435,7 @@ class _DocumentEntryScreenState extends State<DocumentEntryScreen> {
                         width: 90,
                         padding: const EdgeInsets.all(3),
                         decoration: BoxDecoration(
-                          gradient:
-                              isSelected ? _mainGradient : null,
+                          gradient: isSelected ? _mainGradient : null,
                           color: isSelected ? null : Colors.transparent,
                           borderRadius: BorderRadius.circular(12),
                           border: Border.all(
@@ -2376,7 +2791,6 @@ class _DocumentEntryScreenState extends State<DocumentEntryScreen> {
       children: [
         _buildTopHeaderCompact(),
         const SizedBox(height: 12),
-
         _buildActionButton(
           onPressed: () async {
             final result = await Navigator.push(
@@ -2395,7 +2809,6 @@ class _DocumentEntryScreenState extends State<DocumentEntryScreen> {
           label: 'عرض الملفات',
           icon: Icons.folder_open,
         ),
-
         const SizedBox(height: 12),
         _buildSearchCard(),
         const SizedBox(height: 12),

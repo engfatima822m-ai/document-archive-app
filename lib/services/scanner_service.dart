@@ -4,11 +4,34 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter_twain_scanner/flutter_twain_scanner.dart';
 
 class ScannerService {
-  final FlutterTwainScanner _scanner = FlutterTwainScanner();
+  FlutterTwainScanner? _scanner;
 
+  /// 🔹 إعادة تهيئة السكانر (حل مشكلة التعليق)
+  Future<void> _resetScanner() async {
+    try {
+      debugPrint('🔄 إعادة تهيئة السكانر...');
+
+      // قتل أي برنامج Canon مفتوح (احتياط)
+      await Process.run('taskkill', ['/IM', 'TouchDR.exe', '/F']);
+      await Process.run('taskkill', ['/IM', 'CaptureOnTouch.exe', '/F']);
+
+      // انتظار بسيط
+      await Future.delayed(const Duration(seconds: 2));
+
+      // إعادة إنشاء instance جديد
+      _scanner = FlutterTwainScanner();
+
+    } catch (e) {
+      debugPrint('⚠️ خطأ أثناء إعادة التهيئة: $e');
+    }
+  }
+
+  /// 🔹 جلب الأجهزة
   Future<List<String>> getAvailableScanners() async {
     try {
-      final sources = await _scanner.getDataSources();
+      await _resetScanner();
+
+      final sources = await _scanner!.getDataSources();
       debugPrint('Available scanners: $sources');
       return sources;
     } catch (e) {
@@ -16,16 +39,20 @@ class ScannerService {
     }
   }
 
+  /// 🔥 السحب من السكانر (نسخة محسنة بدون تعليق)
   Future<List<String>> scanFromScanner(int sourceIndex) async {
     try {
-      debugPrint('بدء السحب من السكانر...');
+      debugPrint('🚀 بدء السحب من السكانر...');
       debugPrint('sourceIndex = $sourceIndex');
 
-      final List<String> scannedFiles = await _scanner
-          .scanDocument(sourceIndex)
-          .timeout(const Duration(seconds: 45));
+      // 🧨 أهم خطوة: إعادة تهيئة قبل كل سحب
+      await _resetScanner();
 
-      debugPrint('انتهى أمر السحب');
+      final List<String> scannedFiles = await _scanner!
+          .scanDocument(sourceIndex)
+          .timeout(const Duration(seconds: 60));
+
+      debugPrint('✅ انتهى السحب');
       debugPrint('scannedFiles = $scannedFiles');
 
       if (scannedFiles.isEmpty) {
@@ -33,15 +60,22 @@ class ScannerService {
       }
 
       return scannedFiles;
+
     } on TimeoutException {
-      debugPrint('Timeout: المكتبة علقت أثناء السحب');
-      throw Exception('انتهت مهلة السحب. المكتبة لم تُرجع أي نتيجة.');
+      debugPrint('⏱ Timeout: المكتبة علقت');
+      throw Exception('انتهت مهلة السحب. حاول مرة أخرى.');
+
     } catch (e) {
-      debugPrint('Scanner error: $e');
+      debugPrint('❌ Scanner error: $e');
+
+      // 🔥 إعادة تهيئة بعد الخطأ حتى ما يعلق
+      await _resetScanner();
+
       throw Exception('فشل السحب من جهاز السكانر: $e');
     }
   }
 
+  /// 🔹 نقل الصور
   Future<List<String>> moveScannedFilesToDocumentFolder({
     required List<String> scannedFiles,
     required String targetFolderPath,
@@ -54,7 +88,8 @@ class ScannerService {
       if (!await sourceFile.exists()) continue;
 
       final extension = _getExtension(scannedFiles[i]);
-      final newName = 'image_${(i + 1).toString().padLeft(3, '0')}.$extension';
+      final newName =
+          'image_${(i + 1).toString().padLeft(3, '0')}.$extension';
       final newPath = '$targetFolderPath\\$newName';
 
       final copied = await sourceFile.copy(newPath);

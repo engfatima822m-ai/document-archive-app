@@ -4,6 +4,7 @@ import '../models/attachment_model.dart';
 import '../models/document_model.dart';
 
 class DocumentStorageService {
+  // المسار الرئيسي للأرشيف على حاسبة الموظف
   static const String baseArchivePath = r'D:\DocumentArchive';
 
   static final List<DocumentModel> _documents = [];
@@ -15,13 +16,14 @@ class DocumentStorageService {
 
   static Future<void> ensureBaseFolderExists() async {
     final baseDir = Directory(baseArchivePath);
+
     if (!await baseDir.exists()) {
       await baseDir.create(recursive: true);
     }
   }
 
   static String getDocumentFolderPath(String documentNumber) {
-    return '$baseArchivePath\\$documentNumber';
+    return '$baseArchivePath\\${documentNumber.trim()}';
   }
 
   static String getOriginalFolderPath(String documentNumber) {
@@ -32,7 +34,7 @@ class DocumentStorageService {
     required String parentDocumentNumber,
     required String subDocumentNumber,
   }) {
-    return '${getDocumentFolderPath(parentDocumentNumber)}\\$subDocumentNumber';
+    return '${getDocumentFolderPath(parentDocumentNumber)}\\${subDocumentNumber.trim()}';
   }
 
   static Future<bool> documentFolderExists(String documentNumber) async {
@@ -55,6 +57,7 @@ class DocumentStorageService {
         subDocumentNumber: subDocumentNumber,
       ),
     );
+
     return await dir.exists();
   }
 
@@ -77,10 +80,12 @@ class DocumentStorageService {
   }
 
   static Future<String> createOriginalFolder(String documentNumber) async {
-    final mainFolderExists = await documentFolderExists(documentNumber);
+    await ensureBaseFolderExists();
 
-    if (!mainFolderExists) {
-      await createDocumentFolder(documentNumber);
+    final mainFolder = Directory(getDocumentFolderPath(documentNumber));
+
+    if (!await mainFolder.exists()) {
+      await mainFolder.create(recursive: true);
     }
 
     final originalPath = getOriginalFolderPath(documentNumber);
@@ -98,6 +103,7 @@ class DocumentStorageService {
     required String subDocumentNumber,
   }) async {
     final parentExists = await documentFolderExists(parentDocumentNumber);
+
     if (!parentExists) {
       throw Exception('الملف الأصلي غير موجود');
     }
@@ -123,6 +129,7 @@ class DocumentStorageService {
 
   static bool _isImageFile(String path) {
     final lower = path.toLowerCase();
+
     return lower.endsWith('.jpg') ||
         lower.endsWith('.jpeg') ||
         lower.endsWith('.png') ||
@@ -133,6 +140,7 @@ class DocumentStorageService {
   static int _extractImageNumber(String filePath) {
     final fileName = filePath.split(Platform.pathSeparator).last;
     final dotIndex = fileName.lastIndexOf('.');
+
     final nameWithoutExtension =
         dotIndex == -1 ? fileName : fileName.substring(0, dotIndex);
 
@@ -169,6 +177,7 @@ class DocumentStorageService {
     required String targetFolderPath,
   }) async {
     final targetDir = Directory(targetFolderPath);
+
     if (!await targetDir.exists()) {
       await targetDir.create(recursive: true);
     }
@@ -187,7 +196,7 @@ class DocumentStorageService {
         continue;
       }
 
-      final extension = sourcePath.split('.').last;
+      final extension = sourcePath.split('.').last.toLowerCase();
       final newPath = '$targetFolderPath\\$nextIndex.$extension';
 
       final copiedFile = await sourceFile.copy(newPath);
@@ -204,6 +213,7 @@ class DocumentStorageService {
     required String targetFolderPath,
   }) async {
     final targetDir = Directory(targetFolderPath);
+
     if (!await targetDir.exists()) {
       await targetDir.create(recursive: true);
     }
@@ -222,11 +232,21 @@ class DocumentStorageService {
         continue;
       }
 
-      final extension = sourcePath.split('.').last;
+      final extension = sourcePath.split('.').last.toLowerCase();
       final newPath = '$targetFolderPath\\$nextIndex.$extension';
 
-      final movedFile = await sourceFile.rename(newPath);
-      savedPaths.add(movedFile.path);
+      try {
+        final movedFile = await sourceFile.rename(newPath);
+        savedPaths.add(movedFile.path);
+      } catch (_) {
+        // إذا فشل rename بسبب اختلاف القرص أو قفل الملف، نستخدم copy ثم delete
+        final copiedFile = await sourceFile.copy(newPath);
+        savedPaths.add(copiedFile.path);
+
+        try {
+          await sourceFile.delete();
+        } catch (_) {}
+      }
 
       nextIndex++;
     }
@@ -250,7 +270,7 @@ class DocumentStorageService {
     required List<String> imagePaths,
   }) async {
     final document = DocumentModel(
-      documentNumber: documentNumber,
+      documentNumber: documentNumber.trim(),
       documentDate: documentDate,
       documentTitle: documentTitle,
       notes: notes,
@@ -277,11 +297,10 @@ class DocumentStorageService {
     bool moveFiles = false,
   }) async {
     final exists = await documentFolderExists(documentNumber);
+
     if (exists) {
       throw Exception('الملف موجود مسبقاً');
     }
-
-    await createDocumentFolder(documentNumber);
 
     final originalFolderPath = await createOriginalFolder(documentNumber);
 
@@ -296,7 +315,7 @@ class DocumentStorageService {
           );
 
     final document = DocumentModel(
-      documentNumber: documentNumber,
+      documentNumber: documentNumber.trim(),
       documentDate: documentDate,
       documentTitle: documentTitle,
       notes: notes,
@@ -327,6 +346,7 @@ class DocumentStorageService {
 
   static List<DocumentModel> searchDocuments(String query) {
     final q = query.trim().toLowerCase();
+
     if (q.isEmpty) return [];
 
     return _documents.where((doc) {
@@ -350,8 +370,8 @@ class DocumentStorageService {
     required List<String> imagePaths,
   }) async {
     final attachment = AttachmentModel(
-      parentDocumentNumber: parentDocumentNumber,
-      subDocumentNumber: subDocumentNumber,
+      parentDocumentNumber: parentDocumentNumber.trim(),
+      subDocumentNumber: subDocumentNumber.trim(),
       subDocumentDate: subDocumentDate,
       subDocumentTitle: subDocumentTitle,
       notes: notes,
@@ -373,6 +393,7 @@ class DocumentStorageService {
     bool moveFiles = false,
   }) async {
     final parentExists = await documentFolderExists(parentDocumentNumber);
+
     if (!parentExists) {
       throw Exception('الملف الأصلي غير موجود');
     }
@@ -402,8 +423,8 @@ class DocumentStorageService {
           );
 
     final attachment = AttachmentModel(
-      parentDocumentNumber: parentDocumentNumber,
-      subDocumentNumber: subDocumentNumber,
+      parentDocumentNumber: parentDocumentNumber.trim(),
+      subDocumentNumber: subDocumentNumber.trim(),
       subDocumentDate: subDocumentDate,
       subDocumentTitle: subDocumentTitle,
       notes: notes,
@@ -425,8 +446,7 @@ class DocumentStorageService {
     return _attachments
         .where(
           (att) =>
-              att.parentDocumentNumber.trim() ==
-              parentDocumentNumber.trim(),
+              att.parentDocumentNumber.trim() == parentDocumentNumber.trim(),
         )
         .toList();
   }
