@@ -2,7 +2,6 @@ import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
 import 'dart:ui' as ui;
-
 import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
 import 'package:path/path.dart' as p;
@@ -13,6 +12,7 @@ import 'package:printing/printing.dart';
 import '../models/document_model.dart';
 import '../services/scanner_service.dart';
 import 'documents_by_status_screen.dart';
+import 'document_search_screen.dart';
 
 class DocumentEntryScreen extends StatefulWidget {
   const DocumentEntryScreen({super.key});
@@ -27,8 +27,6 @@ class _DocumentEntryScreenState extends State<DocumentEntryScreen> {
   final TextEditingController _documentDateController = TextEditingController();
   final TextEditingController _documentTitleController = TextEditingController();
   final TextEditingController _notesController = TextEditingController();
-  final TextEditingController _searchController = TextEditingController();
-
   final TextEditingController _parentDocumentNumberController =
       TextEditingController();
   final TextEditingController _subDocumentNumberController =
@@ -53,7 +51,6 @@ class _DocumentEntryScreenState extends State<DocumentEntryScreen> {
   bool _isLoading = false;
   bool _isScanning = false;
   bool _isLoadingScanners = false;
-  bool _isSearching = false;
   bool _isImportingTempImages = false;
   bool _isPrinting = false;
   bool _isLoadingReminders = false;
@@ -63,9 +60,6 @@ class _DocumentEntryScreenState extends State<DocumentEntryScreen> {
   String _selectedStatus = 'قيد الإنجاز';
 
   DocumentModel? _savedDocument;
-  DocumentModel? _searchedDocument;
-  List<DocumentModel> _searchResults = [];
-  List<DocumentModel> _searchedAttachments = [];
   List<DocumentModel> _dueReminders = [];
 
   final Color bgColor = const Color(0xFFEAF6FF);
@@ -227,9 +221,7 @@ class _DocumentEntryScreenState extends State<DocumentEntryScreen> {
     Navigator.of(context).pop();
 
     setState(() {
-      _searchedDocument = doc;
-      _savedDocument = null;
-      _searchedAttachments = [];
+      _savedDocument = doc;
     });
 
     await _fillFormFromDocument(doc);
@@ -516,6 +508,17 @@ class _DocumentEntryScreenState extends State<DocumentEntryScreen> {
     }
   }
 
+  Future<void> _evictImageCacheForPaths(List<String> paths) async {
+    for (final path in paths) {
+      try {
+        final file = File(path);
+        if (await file.exists()) {
+          await FileImage(file).evict();
+        }
+      } catch (_) {}
+    }
+  }
+
   void _setPreviewImages(List<String> images) {
     setState(() {
       _scannedImagePaths = images;
@@ -553,11 +556,20 @@ class _DocumentEntryScreenState extends State<DocumentEntryScreen> {
   }
 
   Future<void> _loadScannedImagesFromFolder({bool showMessage = true}) async {
+    final oldImages = List<String>.from(_scannedImagePaths);
+
     setState(() {
       _isImportingTempImages = true;
+
+      // مهم جدًا: نفرغ الصور المعروضة حتى لا تبقى صورة قديمة في الذاكرة.
+      _scannedImagePaths = [];
+      _currentPreviewIndex = 0;
     });
 
     try {
+      // نمسح كاش الصور القديمة والجديدة لأن برنامج Canon قد يحفظ بنفس الاسم مثل Image_001.
+      await _evictImageCacheForPaths(oldImages);
+
       final files = await _getScannedFilesFromTempFolder();
 
       if (files.isEmpty) {
@@ -567,6 +579,7 @@ class _DocumentEntryScreenState extends State<DocumentEntryScreen> {
         return;
       }
 
+      await _evictImageCacheForPaths(files);
       _setPreviewImages(files);
 
       if (showMessage) {
@@ -660,6 +673,8 @@ class _DocumentEntryScreenState extends State<DocumentEntryScreen> {
       final files = await _getScannedFilesFromTempFolder();
 
       if (files.isNotEmpty) {
+        // مهم: نفس اسم الصورة قد يتكرر بين السحبات، لذلك نمسح الكاش قبل العرض.
+        await _evictImageCacheForPaths(files);
         _setPreviewImages(files);
         return true;
       }
@@ -1010,20 +1025,6 @@ class _DocumentEntryScreenState extends State<DocumentEntryScreen> {
     }
   }
 
-  Future<List<DocumentModel>> _searchDocumentsInApi(String query) async {
-    final allDocuments = await _fetchAllDocumentsFromApi();
-    final lowerQuery = query.toLowerCase();
-
-    final results = allDocuments.where((doc) {
-      return doc.documentNumber.toLowerCase().contains(lowerQuery) ||
-          doc.documentTitle.toLowerCase().contains(lowerQuery) ||
-          doc.notes.toLowerCase().contains(lowerQuery);
-    }).toList();
-
-    results.sort((a, b) => b.documentDate.compareTo(a.documentDate));
-    return results;
-  }
-
   String _resolveDocumentRootFolderPath(String folderPath) {
     if (folderPath.trim().isEmpty) return '';
 
@@ -1095,92 +1096,13 @@ class _DocumentEntryScreenState extends State<DocumentEntryScreen> {
     }
   }
 
-  Future<void> _searchDocument() async {
-    final query = _searchController.text.trim();
-
-    if (query.isEmpty) {
-      _showMessage('يرجى إدخال رقم الملف أو كلمة للبحث', isError: true);
-      return;
-    }
-
-    setState(() {
-      _isSearching = true;
-    });
-
-    try {
-      final exactData = await _fetchDocumentWithAttachmentsFromApi(query);
-      final exactDocument = exactData?['document'] as DocumentModel?;
-      final exactAttachments =
-          (exactData?['attachments'] as List<DocumentModel>?) ?? [];
-
-      final results = await _searchDocumentsInApi(query);
-      final selectedDocument =
-          exactDocument ?? (results.isNotEmpty ? results.first : null);
-
-      setState(() {
-        _searchedDocument = selectedDocument;
-        _savedDocument = null;
-        _searchResults = results;
-        _searchedAttachments = exactDocument != null ? exactAttachments : [];
-      });
-
-      if (_searchedDocument == null) {
-        _showMessage('لم يتم العثور على نتيجة', isError: true);
-      } else {
-        await _fillFormFromDocument(_searchedDocument!);
-        _showMessage(
-          _searchedAttachments.isEmpty
-              ? 'تم العثور على الملف'
-              : 'تم العثور على الملف ومعه ${_searchedAttachments.length} كتاب تابع',
-        );
-      }
-    } catch (e) {
-      _showMessage('حدث خطأ أثناء البحث: $e', isError: true);
-    } finally {
-      if (mounted) {
-        setState(() {
-          _isSearching = false;
-        });
-      }
-    }
-  }
-
-  void _clearSearch() {
-    setState(() {
-      _searchController.clear();
-      _searchedDocument = null;
-      _savedDocument = null;
-      _searchResults = [];
-      _searchedAttachments = [];
-      _scannedImagePaths = [];
-      _currentPreviewIndex = 0;
-      _isSubDocument = false;
-      _selectedStatus = 'قيد الإنجاز';
-
-      _documentNumberController.clear();
-      _documentDateController.clear();
-      _documentTitleController.clear();
-      _notesController.clear();
-      _parentDocumentNumberController.clear();
-      _subDocumentNumberController.clear();
-      _reminderDateController.clear();
-      _reminderNoteController.clear();
-    });
-
-    _showMessage('تم مسح نتيجة البحث');
-  }
-
 
 
   void _clearScreenAfterSuccessfulSave() {
     if (!mounted) return;
 
     setState(() {
-      _searchController.clear();
-      _searchedDocument = null;
       _savedDocument = null;
-      _searchResults = [];
-      _searchedAttachments = [];
       _scannedImagePaths = [];
       _currentPreviewIndex = 0;
       _isSubDocument = false;
@@ -1206,11 +1128,7 @@ class _DocumentEntryScreenState extends State<DocumentEntryScreen> {
 
     try {
       // تنظيف حالة الصفحة بالكامل مثل فتح التطبيق من جديد
-      _searchController.clear();
-      _searchedDocument = null;
       _savedDocument = null;
-      _searchResults = [];
-      _searchedAttachments = [];
       _scannedImagePaths = [];
       _currentPreviewIndex = 0;
       _isSubDocument = false;
@@ -1270,7 +1188,9 @@ class _DocumentEntryScreenState extends State<DocumentEntryScreen> {
       _documentDateController.text = document.documentDate;
       _documentTitleController.text = document.documentTitle;
       _notesController.text = document.notes;
-      _selectedStatus = document.status;
+      _selectedStatus = ['قيد الإنجاز', 'منجز', 'تم الاطلاع'].contains(document.status)
+          ? document.status
+          : 'قيد الإنجاز';
       _reminderDateController.text = document.reminderDate ?? '';
       _reminderNoteController.text = document.reminderNote ?? '';
       _parentDocumentNumberController.text = document.documentNumber;
@@ -1288,8 +1208,29 @@ class _DocumentEntryScreenState extends State<DocumentEntryScreen> {
     _showMessage('تم مسح الصور المعروضة');
   }
 
-  Future<String> _createMainDocumentFolder(String documentNumber) async {
-    final mainFolderPath = p.join(_archiveRootPath, documentNumber);
+  String _safeFolderName(String value) {
+    final cleaned = value
+        .trim()
+        .replaceAll(RegExp(r'[\/:*?"<>|]'), '_')
+        .replaceAll(RegExp(r'\s+'), '_');
+
+    return cleaned.isEmpty ? 'بدون_اسم' : cleaned;
+  }
+
+  Future<String> _createMainDocumentFolder({
+    required String documentNumber,
+    required String documentDate,
+    required String documentTitle,
+  }) async {
+    final safeNumber = _safeFolderName(documentNumber);
+    final safeDate = _safeFolderName(documentDate);
+    final safeTitle = _safeFolderName(documentTitle);
+
+    // مهم: اسم الفولدر صار يعتمد على الرقم + التاريخ + الاسم
+    // حتى إذا تكرر نفس الرقم مع تاريخ أو اسم مختلف ينحفظ بفولدر مستقل.
+    final folderName = '${safeNumber}_${safeDate}_$safeTitle';
+
+    final mainFolderPath = p.join(_archiveRootPath, folderName);
     final originalFolderPath = p.join(mainFolderPath, 'original');
 
     final mainFolder = Directory(mainFolderPath);
@@ -1306,19 +1247,54 @@ class _DocumentEntryScreenState extends State<DocumentEntryScreen> {
     return originalFolderPath;
   }
 
+  Future<String?> _findParentDocumentFolderPath(String parentDocumentNumber) async {
+    final rootDir = Directory(_archiveRootPath);
+    if (!await rootDir.exists()) return null;
+
+    final safeParentNumber = _safeFolderName(parentDocumentNumber).toLowerCase();
+
+    // دعم النسخ القديمة التي كان اسم فولدرها رقم الملف فقط.
+    final oldDirectFolder = Directory(p.join(_archiveRootPath, parentDocumentNumber));
+    if (await oldDirectFolder.exists()) {
+      return oldDirectFolder.path;
+    }
+
+    final possibleFolders = <Directory>[];
+
+    for (final entity in rootDir.listSync()) {
+      if (entity is Directory) {
+        final folderName = p.basename(entity.path).toLowerCase();
+        if (folderName == safeParentNumber ||
+            folderName.startsWith('${safeParentNumber}_')) {
+          possibleFolders.add(entity);
+        }
+      }
+    }
+
+    if (possibleFolders.isEmpty) return null;
+
+    possibleFolders.sort((a, b) {
+      final aTime = a.statSync().modified;
+      final bTime = b.statSync().modified;
+      return bTime.compareTo(aTime);
+    });
+
+    return possibleFolders.first.path;
+  }
+
   Future<String> _createAttachmentFolder({
     required String parentDocumentNumber,
     required String subDocumentNumber,
   }) async {
-    final mainFolderPath = p.join(_archiveRootPath, parentDocumentNumber);
-    final attachmentFolderPath = p.join(mainFolderPath, subDocumentNumber);
+    final parentFolderPath = await _findParentDocumentFolderPath(parentDocumentNumber);
 
-    final mainFolder = Directory(mainFolderPath);
-    final attachmentFolder = Directory(attachmentFolderPath);
-
-    if (!await mainFolder.exists()) {
+    if (parentFolderPath == null || parentFolderPath.trim().isEmpty) {
       throw Exception('الملف الأصلي غير موجود');
     }
+
+    final safeSubDocumentNumber = _safeFolderName(subDocumentNumber);
+    final attachmentFolderPath = p.join(parentFolderPath, safeSubDocumentNumber);
+    final attachmentFolder = Directory(attachmentFolderPath);
 
     if (!await attachmentFolder.exists()) {
       await attachmentFolder.create(recursive: true);
@@ -1447,10 +1423,9 @@ class _DocumentEntryScreenState extends State<DocumentEntryScreen> {
       if (_isSubDocument) {
         // الكتاب التابع يعتمد على وجود فولدر الملف الأصلي داخل D:\DocumentArchive
         // حتى لو لم يكن الملف الأصلي موجوداً داخل قاعدة البيانات.
-        final parentFolderPath = p.join(_archiveRootPath, parentDocumentNumber);
-        final parentFolder = Directory(parentFolderPath);
+        final parentFolderPath = await _findParentDocumentFolderPath(parentDocumentNumber);
 
-        if (!await parentFolder.exists()) {
+        if (parentFolderPath == null || parentFolderPath.trim().isEmpty) {
           _showMessage(
             'الملف الأصلي غير موجود داخل D:\\DocumentArchive\nتأكدي أن رقم الملف الأصلي مطابق لاسم الفولدر بالضبط',
             isError: true,
@@ -1506,10 +1481,7 @@ class _DocumentEntryScreenState extends State<DocumentEntryScreen> {
 
         setState(() {
           _savedDocument = attachmentPreview;
-          _searchedDocument = null;
-          _searchResults = [];
-          _searchedAttachments = [];
-          _scannedImagePaths = movedImages;
+                      _scannedImagePaths = movedImages;
           _currentPreviewIndex = 0;
         });
 
@@ -1522,7 +1494,11 @@ class _DocumentEntryScreenState extends State<DocumentEntryScreen> {
       } else {
         // الملف الرئيسي: ننشئ فولدر باسم رقم الملف داخل D:\DocumentArchive
         // ونضع الصور داخل original. إذا كان الفولدر موجوداً نضيف الصور بتسلسل جديد.
-        final folderPath = await _createMainDocumentFolder(documentNumber);
+        final folderPath = await _createMainDocumentFolder(
+          documentNumber: documentNumber,
+          documentDate: documentDate,
+          documentTitle: documentTitle,
+        );
 
         final movedImages = await _moveScannedFilesToDocumentFolder(
           scannedFiles: _scannedImagePaths,
@@ -1548,14 +1524,9 @@ class _DocumentEntryScreenState extends State<DocumentEntryScreen> {
 
         bool apiSaved = true;
         try {
-          final existingDocument = await _fetchDocumentByNumberFromApi(documentNumber);
-
-          if (existingDocument == null) {
-            await _insertDocumentToApi(document);
-          } else {
-            // إذا كان موجوداً بقاعدة البيانات، لا نوقف الحفظ لأن الصور انحفظت فعلاً بالفولدر.
-            apiSaved = false;
-          }
+          // مهم: لا نفحص التكرار بالرقم فقط هنا.
+          // ملف insert_document.php صار يمنع التكرار حسب الرقم + التاريخ + الاسم.
+          await _insertDocumentToApi(document);
         } catch (_) {
           // حتى لو تعطلت قاعدة البيانات، لا نخسر حفظ الصور على D.
           apiSaved = false;
@@ -1563,10 +1534,7 @@ class _DocumentEntryScreenState extends State<DocumentEntryScreen> {
 
         setState(() {
           _savedDocument = document;
-          _searchedDocument = null;
-          _searchResults = [];
-          _searchedAttachments = [];
-          _scannedImagePaths = movedImages;
+                      _scannedImagePaths = movedImages;
           _currentPreviewIndex = 0;
         });
 
@@ -1595,7 +1563,7 @@ class _DocumentEntryScreenState extends State<DocumentEntryScreen> {
   }
 
   Future<void> _printCurrentDocument() async {
-    final activeDocument = _searchedDocument ?? _savedDocument;
+    final activeDocument = _savedDocument;
 
     if (activeDocument == null) {
       _showMessage('لا يوجد ملف محدد للطباعة', isError: true);
@@ -2239,331 +2207,6 @@ class _DocumentEntryScreenState extends State<DocumentEntryScreen> {
     );
   }
 
-  Widget _buildSearchCard() {
-    return Container(
-      padding: const EdgeInsets.all(16),
-      decoration: _cardDecoration(),
-      child: Directionality(
-        textDirection: ui.TextDirection.rtl,
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            _buildSectionTitle('البحث عن ملف', icon: Icons.search_rounded),
-            const SizedBox(height: 10),
-            _buildTextField(
-              label: 'رقم الملف أو نص البحث',
-              icon: Icons.manage_search_rounded,
-              controller: _searchController,
-              hint: 'مثال: 12345 أو كلمة من الملاحظات',
-            ),
-            const SizedBox(height: 10),
-            Row(
-              children: [
-                Expanded(
-                  child: _buildActionButton(
-                    onPressed: _isSearching ? null : _searchDocument,
-                    label: _isSearching ? 'جاري البحث...' : 'بحث',
-                    icon: Icons.search,
-                    loading: _isSearching,
-                  ),
-                ),
-                const SizedBox(width: 8),
-                Expanded(
-                  child: _buildOutlinedActionButton(
-                    onPressed: _clearSearch,
-                    label: 'مسح',
-                    icon: Icons.close,
-                  ),
-                ),
-              ],
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-
-  Widget _buildMiniInfoRow(String title, String value) {
-    return Padding(
-      padding: const EdgeInsets.only(bottom: 7),
-      child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 10),
-        decoration: BoxDecoration(
-          color: Colors.white.withOpacity(0.9),
-          borderRadius: BorderRadius.circular(12),
-          border: Border.all(color: borderColor),
-        ),
-        child: Row(
-          children: [
-            Expanded(
-              child: Text(
-                value.isEmpty ? '-' : value,
-                textAlign: TextAlign.right,
-                style: TextStyle(
-                  color: darkColor,
-                  fontWeight: FontWeight.w600,
-                  fontSize: 13.2,
-                ),
-              ),
-            ),
-            const SizedBox(width: 8),
-            Text(
-              '$title:',
-              style: TextStyle(
-                color: softTextColor,
-                fontWeight: FontWeight.w700,
-                fontSize: 12.3,
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-
-  Widget _buildAttachmentCard(DocumentModel attachment) {
-    return Padding(
-      padding: const EdgeInsets.only(bottom: 8),
-      child: InkWell(
-        onTap: () async {
-          setState(() {
-            _searchedDocument = attachment;
-            _savedDocument = null;
-          });
-          await _fillFormFromDocument(attachment);
-        },
-        borderRadius: BorderRadius.circular(14),
-        child: Container(
-          padding: const EdgeInsets.all(12),
-          decoration: BoxDecoration(
-            color: Colors.white.withOpacity(0.9),
-            borderRadius: BorderRadius.circular(14),
-            border: Border.all(color: borderColor),
-            boxShadow: [
-              BoxShadow(
-                color: accentColor.withOpacity(0.04),
-                blurRadius: 5,
-                offset: const Offset(0, 2),
-              ),
-            ],
-          ),
-          child: Row(
-            children: [
-              Container(
-                width: 42,
-                height: 42,
-                decoration: BoxDecoration(
-                  gradient: _mainGradient,
-                  borderRadius: BorderRadius.circular(12),
-                ),
-                child: const Icon(
-                  Icons.attach_file_rounded,
-                  color: Colors.white,
-                  size: 22,
-                ),
-              ),
-              const SizedBox(width: 10),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.end,
-                  children: [
-                    Text(
-                      'كتاب تابع رقم ${attachment.documentNumber}',
-                      textAlign: TextAlign.right,
-                      style: TextStyle(
-                        color: darkColor,
-                        fontWeight: FontWeight.w800,
-                        fontSize: 13.5,
-                      ),
-                    ),
-                    const SizedBox(height: 4),
-                    Text(
-                      attachment.documentTitle.isEmpty
-                          ? 'بدون عنوان'
-                          : attachment.documentTitle,
-                      textAlign: TextAlign.right,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: TextStyle(
-                        color: softTextColor,
-                        fontWeight: FontWeight.w600,
-                        fontSize: 12.5,
-                      ),
-                    ),
-                    const SizedBox(height: 4),
-                    Text(
-                      'التأريخ: ${attachment.documentDate.isEmpty ? '-' : attachment.documentDate}',
-                      textAlign: TextAlign.right,
-                      style: TextStyle(
-                        color: softTextColor,
-                        fontSize: 12,
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-              const SizedBox(width: 8),
-              Icon(
-                Icons.chevron_left_rounded,
-                color: accentColor,
-                size: 24,
-              ),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
-
-  Widget _buildResultCard() {
-    final activeDocument = _searchedDocument ?? _savedDocument;
-
-    return Container(
-      padding: const EdgeInsets.all(16),
-      decoration: _cardDecoration(),
-      child: Directionality(
-        textDirection: ui.TextDirection.rtl,
-        child: activeDocument == null
-            ? Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  _buildSectionTitle(
-                    'نتيجة البحث',
-                    icon: Icons.assignment_outlined,
-                  ),
-                  const SizedBox(height: 8),
-                  Text(
-                    'لم يتم العثور على أي ملف بعد.',
-                    style: TextStyle(
-                      color: softTextColor,
-                      fontSize: 13,
-                    ),
-                  ),
-                ],
-              )
-            : Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  _buildSectionTitle(
-                    'نتيجة البحث',
-                    icon: Icons.assignment_outlined,
-                  ),
-                  const SizedBox(height: 10),
-                  _buildMiniInfoRow('رقم الملف', activeDocument.documentNumber),
-                  _buildMiniInfoRow('تأريخ الملف', activeDocument.documentDate),
-                  _buildMiniInfoRow('اسم الملف', activeDocument.documentTitle),
-                  _buildMiniInfoRow('ملاحظات', activeDocument.notes),
-                  _buildMiniInfoRow('الحالة', activeDocument.status),
-                  _buildMiniInfoRow(
-                    'تاريخ التذكير',
-                    activeDocument.reminderDate ?? '',
-                  ),
-                  _buildMiniInfoRow(
-                    'عدد الصور',
-                    _scannedImagePaths.isNotEmpty
-                        ? _scannedImagePaths.length.toString()
-                        : activeDocument.imagePaths.length.toString(),
-                  ),
-                  _buildMiniInfoRow('مسار الفولدر', activeDocument.folderPath),
-                  const SizedBox(height: 8),
-                  _buildActionButton(
-                    onPressed: () async {
-                      await _fillFormFromDocument(activeDocument);
-                    },
-                    label: 'تعبئة الحقول',
-                    icon: Icons.edit_note_outlined,
-                  ),
-                  const SizedBox(height: 8),
-                  _buildActionButton(
-                    onPressed: _isPrinting ? null : _printCurrentDocument,
-                    label: _isPrinting ? 'جاري تجهيز الطباعة...' : 'طباعة الملف',
-                    icon: Icons.print_outlined,
-                    dark: true,
-                    loading: _isPrinting,
-                  ),
-                  const SizedBox(height: 10),
-                  Text(
-                    'صور الملف',
-                    style: TextStyle(
-                      fontSize: 14,
-                      fontWeight: FontWeight.w800,
-                      color: darkColor,
-                    ),
-                  ),
-                  const SizedBox(height: 6),
-                  _buildSavedImagesPreview(
-                    _scannedImagePaths.isNotEmpty
-                        ? _scannedImagePaths
-                        : activeDocument.imagePaths,
-                  ),
-                  if (_searchedAttachments.isNotEmpty) ...[
-                    const SizedBox(height: 12),
-                    Text(
-                      'الكتب التابعة داخل هذا الملف (${_searchedAttachments.length})',
-                      style: TextStyle(
-                        fontSize: 14,
-                        fontWeight: FontWeight.w800,
-                        color: darkColor,
-                      ),
-                    ),
-                    const SizedBox(height: 8),
-                    ..._searchedAttachments.map(_buildAttachmentCard),
-                  ],
-                  if (_searchResults.length > 1) ...[
-                    const SizedBox(height: 10),
-                    Text(
-                      'نتائج إضافية (${_searchResults.length})',
-                      style: TextStyle(
-                        fontSize: 13,
-                        fontWeight: FontWeight.w700,
-                        color: darkColor,
-                      ),
-                    ),
-                    const SizedBox(height: 6),
-                    ..._searchResults.take(5).map(
-                      (doc) => Padding(
-                        padding: const EdgeInsets.only(bottom: 5),
-                        child: InkWell(
-                          onTap: () async {
-                            final exactData = await _fetchDocumentWithAttachmentsFromApi(
-                              doc.documentNumber,
-                            );
-                            final attachments =
-                                (exactData?['attachments'] as List<DocumentModel>?) ?? [];
-
-                            setState(() {
-                              _searchedDocument = doc;
-                              _savedDocument = null;
-                              _searchedAttachments = attachments;
-                            });
-                            await _fillFormFromDocument(doc);
-                          },
-                          child: Container(
-                            padding: const EdgeInsets.all(10),
-                            decoration: BoxDecoration(
-                              color: Colors.white.withOpacity(0.88),
-                              borderRadius: BorderRadius.circular(12),
-                              border: Border.all(color: borderColor),
-                            ),
-                            child: Text(
-                              '${doc.documentNumber} - ${doc.documentTitle}',
-                              style: TextStyle(
-                                color: darkColor,
-                                fontWeight: FontWeight.w600,
-                                fontSize: 12.5,
-                              ),
-                            ),
-                          ),
-                        ),
-                      ),
-                    ),
-                  ],
-                ],
-              ),
-      ),
-    );
-  }
-
   Widget _buildPreviewNavigationButton({
     required IconData icon,
     required VoidCallback onTap,
@@ -2868,6 +2511,9 @@ class _DocumentEntryScreenState extends State<DocumentEntryScreen> {
 
   Widget _buildStatusDropdown() {
     const statuses = ['منجز', 'قيد الإنجاز', 'تم الاطلاع'];
+    final safeSelectedStatus = statuses.contains(_selectedStatus)
+        ? _selectedStatus
+        : 'قيد الإنجاز';
 
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 2),
@@ -2878,7 +2524,7 @@ class _DocumentEntryScreenState extends State<DocumentEntryScreen> {
       ),
       child: DropdownButtonHideUnderline(
         child: DropdownButton<String>(
-          value: _selectedStatus,
+          value: safeSelectedStatus,
           isExpanded: true,
           borderRadius: BorderRadius.circular(16),
           style: TextStyle(
@@ -3075,6 +2721,30 @@ class _DocumentEntryScreenState extends State<DocumentEntryScreen> {
     );
   }
 
+  Future<void> _openSearchScreen() async {
+    final result = await Navigator.push<DocumentModel>(
+      context,
+      MaterialPageRoute(
+        builder: (_) => const DocumentSearchScreen(),
+      ),
+    );
+
+    if (result != null) {
+      setState(() {
+        _savedDocument = result;
+      });
+      await _fillFormFromDocument(result);
+    }
+  }
+
+  Widget _buildSearchNavigationButton() {
+    return _buildActionButton(
+      onPressed: _openSearchScreen,
+      label: 'البحث عن ملف',
+      icon: Icons.search_rounded,
+    );
+  }
+
   Widget _buildRightColumn({required bool scrollableInside}) {
     final content = Column(
       children: [
@@ -3099,9 +2769,7 @@ class _DocumentEntryScreenState extends State<DocumentEntryScreen> {
           icon: Icons.folder_open,
         ),
         const SizedBox(height: 12),
-        _buildSearchCard(),
-        const SizedBox(height: 12),
-        _buildResultCard(),
+        _buildSearchNavigationButton(),
         const SizedBox(height: 12),
         _buildInfoCard(),
         const SizedBox(height: 10),
@@ -3167,9 +2835,7 @@ class _DocumentEntryScreenState extends State<DocumentEntryScreen> {
           icon: Icons.folder_open,
         ),
         const SizedBox(height: 12),
-        _buildSearchCard(),
-        const SizedBox(height: 12),
-        _buildResultCard(),
+        _buildSearchNavigationButton(),
         const SizedBox(height: 12),
         _buildInfoCard(),
         const SizedBox(height: 12),
@@ -3189,7 +2855,6 @@ class _DocumentEntryScreenState extends State<DocumentEntryScreen> {
     _documentDateController.dispose();
     _documentTitleController.dispose();
     _notesController.dispose();
-    _searchController.dispose();
     _parentDocumentNumberController.dispose();
     _subDocumentNumberController.dispose();
     _reminderDateController.dispose();
