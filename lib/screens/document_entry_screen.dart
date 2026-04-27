@@ -632,7 +632,7 @@ class _DocumentEntryScreenState extends State<DocumentEntryScreen> {
     } catch (_) {}
 
     // ننتظر قليلاً لأن درايفر ISIS يحتاج ثواني حتى يتحرر بعد إغلاق البرنامج.
-    await Future.delayed(const Duration(seconds: 3));
+    await Future.delayed(const Duration(milliseconds: 700));
   }
 
   Future<void> _startCanonScannerProgram() async {
@@ -652,7 +652,7 @@ class _DocumentEntryScreenState extends State<DocumentEntryScreen> {
     );
 
     // نمهل برنامج Canon حتى يفتح ويتعرف على السكانر قبل أي إجراء آخر.
-    await Future.delayed(const Duration(seconds: 4));
+    await Future.delayed(const Duration(seconds: 1));
   }
 
   Future<bool> _waitAndLoadScannedImages() async {
@@ -1170,6 +1170,33 @@ class _DocumentEntryScreenState extends State<DocumentEntryScreen> {
     _showMessage('تم مسح نتيجة البحث');
   }
 
+
+
+  void _clearScreenAfterSuccessfulSave() {
+    if (!mounted) return;
+
+    setState(() {
+      _searchController.clear();
+      _searchedDocument = null;
+      _savedDocument = null;
+      _searchResults = [];
+      _searchedAttachments = [];
+      _scannedImagePaths = [];
+      _currentPreviewIndex = 0;
+      _isSubDocument = false;
+      _selectedStatus = 'قيد الإنجاز';
+
+      _documentNumberController.clear();
+      _documentDateController.clear();
+      _documentTitleController.clear();
+      _notesController.clear();
+      _parentDocumentNumberController.clear();
+      _subDocumentNumberController.clear();
+      _reminderDateController.clear();
+      _reminderNoteController.clear();
+    });
+  }
+
   Future<void> _refreshApp() async {
     if (_isRefreshingApp) return;
 
@@ -1555,20 +1582,7 @@ class _DocumentEntryScreenState extends State<DocumentEntryScreen> {
         await _loadDueReminders();
       } catch (_) {}
 
-      setState(() {
-        _selectedStatus = 'قيد الإنجاز';
-        _isSubDocument = false;
-      });
-
-      _documentNumberController.clear();
-      _documentDateController.clear();
-      _documentTitleController.clear();
-      _notesController.clear();
-      _searchController.clear();
-      _parentDocumentNumberController.clear();
-      _subDocumentNumberController.clear();
-      _reminderDateController.clear();
-      _reminderNoteController.clear();
+      _clearScreenAfterSuccessfulSave();
     } catch (e) {
       _showMessage('حدث خطأ أثناء الحفظ: $e', isError: true);
     } finally {
