@@ -135,6 +135,7 @@ class _DocumentSearchScreenState extends State<DocumentSearchScreen> {
       documentNumber: (map['document_number'] ?? '').toString(),
       documentDate: (map['document_date'] ?? '').toString(),
       documentTitle: (map['document_title'] ?? '').toString(),
+      category: map['category']?.toString(),
       notes: (map['notes'] ?? '').toString(),
       status: (map['status'] ?? 'قيد الإنجاز').toString(),
       reminderDate: map['reminder_date']?.toString(),
@@ -152,6 +153,7 @@ class _DocumentSearchScreenState extends State<DocumentSearchScreen> {
       documentNumber: (map['sub_document_number'] ?? map['document_number'] ?? '').toString(),
       documentDate: (map['sub_document_date'] ?? map['document_date'] ?? '').toString(),
       documentTitle: (map['sub_document_title'] ?? map['document_title'] ?? '').toString(),
+      category: map['category']?.toString(),
       notes: (map['notes'] ?? '').toString(),
       status: 'كتاب تابع',
       reminderDate: map['reminder_date']?.toString(),
@@ -178,9 +180,10 @@ class _DocumentSearchScreenState extends State<DocumentSearchScreen> {
     }
 
     final List docs = data['documents'] ?? [];
-    return docs
-        .map((item) => _documentFromJson(Map<String, dynamic>.from(item)))
-        .toList();
+    return docs.map((item) {
+      final map = Map<String, dynamic>.from(item);
+      return _isAttachmentMap(map) ? _attachmentFromJson(map) : _documentFromJson(map);
+    }).toList();
   }
 
   Future<Map<String, dynamic>?> _fetchDocumentWithAttachmentsFromApi(
@@ -199,8 +202,8 @@ class _DocumentSearchScreenState extends State<DocumentSearchScreen> {
     if (data['success'] == true && data['document'] != null) {
       final type = (data['type'] ?? '').toString();
       final documentMap = Map<String, dynamic>.from(data['document']);
-      final document = type == 'attachment'
-          ? _documentFromJson(documentMap).copyWith(status: 'كتاب تابع')
+      final document = type == 'attachment' || _isAttachmentMap(documentMap)
+          ? _attachmentFromJson(documentMap)
           : _documentFromJson(documentMap);
 
       final List attachmentsJson = data['attachments'] ?? [];
@@ -219,10 +222,17 @@ class _DocumentSearchScreenState extends State<DocumentSearchScreen> {
     final lowerQuery = query.toLowerCase();
 
     final results = allDocuments.where((doc) {
+      final category = (doc.category ?? '').toLowerCase();
+      final parentTitle = _parentTitleFor(doc).toLowerCase();
+      final parentNumber = _parentNumberFor(doc).toLowerCase();
       return doc.documentNumber.toLowerCase().contains(lowerQuery) ||
           doc.documentTitle.toLowerCase().contains(lowerQuery) ||
           doc.notes.toLowerCase().contains(lowerQuery) ||
-          doc.status.toLowerCase().contains(lowerQuery);
+          doc.status.toLowerCase().contains(lowerQuery) ||
+          category.contains(lowerQuery) ||
+          parentTitle.contains(lowerQuery) ||
+          parentNumber.contains(lowerQuery) ||
+          doc.folderPath.toLowerCase().contains(lowerQuery);
     }).toList();
 
     results.sort((a, b) => b.documentDate.compareTo(a.documentDate));
@@ -386,11 +396,16 @@ class _DocumentSearchScreenState extends State<DocumentSearchScreen> {
       _searchedDocument = document;
       _searchedAttachments = [];
     });
-    final exactData = await _fetchDocumentWithAttachmentsFromApi(document.documentNumber);
-    final attachments = (exactData?['attachments'] as List<DocumentModel>?) ?? [];
-    setState(() {
-      _searchedAttachments = attachments;
-    });
+    if (document.status.trim() == 'كتاب تابع') {
+      setState(() {
+        _searchedAttachments = [];
+      });
+    } else {
+      final attachments = await _fetchAttachmentsForDocument(document);
+      setState(() {
+        _searchedAttachments = attachments;
+      });
+    }
     await _loadPreviewFor(document);
   }
 
@@ -603,6 +618,10 @@ class _DocumentSearchScreenState extends State<DocumentSearchScreen> {
                     Text(attachment.documentTitle.isEmpty ? 'بدون عنوان' : attachment.documentTitle, textAlign: TextAlign.right, maxLines: 1, overflow: TextOverflow.ellipsis, style: TextStyle(color: softTextColor, fontWeight: FontWeight.w600, fontSize: 12.5)),
                     const SizedBox(height: 4),
                     Text('التأريخ: ${attachment.documentDate.isEmpty ? '-' : attachment.documentDate}', textAlign: TextAlign.right, style: TextStyle(color: softTextColor, fontSize: 12)),
+                    if ((attachment.category ?? '').trim().isNotEmpty) ...[
+                      const SizedBox(height: 4),
+                      Text('التصنيف: ${attachment.category}', textAlign: TextAlign.right, style: TextStyle(color: accentDarkColor, fontWeight: FontWeight.w700, fontSize: 12)),
+                    ],
                     if (parentTitle.isNotEmpty || parentNumber.isNotEmpty) ...[
                       const SizedBox(height: 4),
                       Text(
@@ -643,9 +662,15 @@ class _DocumentSearchScreenState extends State<DocumentSearchScreen> {
               children: [
                 _buildSectionTitle('نتيجة البحث', icon: Icons.assignment_outlined),
                 const SizedBox(height: 10),
+                _buildMiniInfoRow('النوع', activeDocument.status.trim() == 'كتاب تابع' ? 'كتاب تابع' : 'ملف رئيسي'),
                 _buildMiniInfoRow('رقم الملف', activeDocument.documentNumber),
+                if (activeDocument.status.trim() == 'كتاب تابع') ...[
+                  _buildMiniInfoRow('رقم الملف الأصلي', _parentNumberFor(activeDocument)),
+                  _buildMiniInfoRow('اسم الملف الأصلي', _parentTitleFor(activeDocument)),
+                ],
                 _buildMiniInfoRow('تأريخ الملف', activeDocument.documentDate),
                 _buildMiniInfoRow('اسم الملف', activeDocument.documentTitle),
+                _buildMiniInfoRow('التصنيف', activeDocument.category ?? ''),
                 _buildMiniInfoRow('ملاحظات', activeDocument.notes),
                 _buildMiniInfoRow('الحالة', activeDocument.status),
                 _buildMiniInfoRow('تاريخ التذكير', activeDocument.reminderDate ?? ''),
@@ -683,7 +708,11 @@ class _DocumentSearchScreenState extends State<DocumentSearchScreen> {
                             child: Container(
                               padding: const EdgeInsets.all(10),
                               decoration: BoxDecoration(color: Colors.white.withOpacity(0.88), borderRadius: BorderRadius.circular(12), border: Border.all(color: borderColor)),
-                              child: Text('${doc.documentNumber} - ${doc.documentTitle}', textAlign: TextAlign.right, style: TextStyle(color: darkColor, fontWeight: FontWeight.w600, fontSize: 12.5)),
+                              child: Text(
+                                '${doc.status.trim() == 'كتاب تابع' ? 'تابع' : 'رئيسي'} | ${doc.documentNumber} - ${doc.documentTitle}${(doc.category ?? '').trim().isNotEmpty ? ' | ${doc.category}' : ''}',
+                                textAlign: TextAlign.right,
+                                style: TextStyle(color: darkColor, fontWeight: FontWeight.w600, fontSize: 12.5),
+                              ),
                             ),
                           ),
                         ),
@@ -859,6 +888,7 @@ extension _DocumentCopy on DocumentModel {
       documentNumber: documentNumber,
       documentDate: documentDate,
       documentTitle: documentTitle,
+      category: category,
       notes: notes,
       status: status ?? this.status,
       reminderDate: reminderDate,

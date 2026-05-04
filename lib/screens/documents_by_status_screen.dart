@@ -30,7 +30,7 @@ class _DocumentsByStatusScreenState extends State<DocumentsByStatusScreen>
   @override
   void initState() {
     super.initState();
-    _tabController = TabController(length: 3, vsync: this);
+    _tabController = TabController(length: 4, vsync: this);
     _loadDocuments();
   }
 
@@ -58,10 +58,25 @@ class _DocumentsByStatusScreenState extends State<DocumentsByStatusScreen>
     }
   }
 
+  bool _isAttachment(dynamic doc) {
+    final status = (doc['status'] ?? '').toString().trim();
+    final recordType = (doc['record_type'] ?? '').toString().trim();
+
+    return status == 'كتاب تابع' ||
+        recordType == 'attachment' ||
+        doc['sub_document_number'] != null ||
+        doc['parent_document_number'] != null;
+  }
+
   List<dynamic> _filterByStatus(String status) {
     return allDocuments.where((doc) {
+      if (_isAttachment(doc)) return false;
       return (doc['status'] ?? '').toString().trim() == status;
     }).toList();
+  }
+
+  List<dynamic> _filterAttachments() {
+    return allDocuments.where((doc) => _isAttachment(doc)).toList();
   }
 
   LinearGradient get _mainGradient => LinearGradient(
@@ -70,7 +85,7 @@ class _DocumentsByStatusScreenState extends State<DocumentsByStatusScreen>
         end: Alignment.centerLeft,
       );
 
-  Widget _buildEmptyState(String status) {
+  Widget _buildEmptyState(String title) {
     return Center(
       child: Container(
         padding: const EdgeInsets.all(28),
@@ -86,7 +101,7 @@ class _DocumentsByStatusScreenState extends State<DocumentsByStatusScreen>
             Icon(Icons.folder_off_outlined, size: 58, color: accentColor),
             const SizedBox(height: 14),
             Text(
-              "لا توجد ملفات بحالة $status",
+              "لا توجد ملفات ضمن $title",
               style: TextStyle(
                 color: accentDarkColor,
                 fontSize: 17,
@@ -95,7 +110,7 @@ class _DocumentsByStatusScreenState extends State<DocumentsByStatusScreen>
             ),
             const SizedBox(height: 6),
             Text(
-              "عند حفظ ملفات بهذه الحالة ستظهر هنا تلقائيًا.",
+              "عند حفظ ملفات ضمن هذا القسم ستظهر هنا تلقائيًا.",
               textAlign: TextAlign.center,
               style: TextStyle(color: softTextColor, fontSize: 13),
             ),
@@ -105,8 +120,8 @@ class _DocumentsByStatusScreenState extends State<DocumentsByStatusScreen>
     );
   }
 
-  Widget _buildList(List<dynamic> docs, String status) {
-    if (docs.isEmpty) return _buildEmptyState(status);
+  Widget _buildList(List<dynamic> docs, String title) {
+    if (docs.isEmpty) return _buildEmptyState(title);
 
     return ListView.separated(
       padding: const EdgeInsets.all(16),
@@ -115,10 +130,17 @@ class _DocumentsByStatusScreenState extends State<DocumentsByStatusScreen>
       itemBuilder: (context, index) {
         final doc = docs[index];
 
+        final isAttachment = _isAttachment(doc);
         final number = (doc['document_number'] ?? '').toString();
         final title = (doc['document_title'] ?? '').toString();
         final date = (doc['document_date'] ?? '').toString();
         final notes = (doc['notes'] ?? '').toString();
+        final category = (doc['category'] ?? '').toString();
+        final status = (doc['status'] ?? '').toString();
+
+        final parentNumber =
+            (doc['parent_document_number'] ?? doc['parent_document_number_for_display'] ?? '')
+                .toString();
 
         return InkWell(
           onTap: () => Navigator.pop(context, doc),
@@ -146,8 +168,10 @@ class _DocumentsByStatusScreenState extends State<DocumentsByStatusScreen>
                     gradient: _mainGradient,
                     borderRadius: BorderRadius.circular(15),
                   ),
-                  child: const Icon(
-                    Icons.description_outlined,
+                  child: Icon(
+                    isAttachment
+                        ? Icons.attach_file_rounded
+                        : Icons.description_outlined,
                     color: Colors.white,
                   ),
                 ),
@@ -167,7 +191,9 @@ class _DocumentsByStatusScreenState extends State<DocumentsByStatusScreen>
                       ),
                       const SizedBox(height: 5),
                       Text(
-                        "رقم الملف: ${number.isEmpty ? '-' : number}",
+                        isAttachment
+                            ? "رقم الكتاب التابع: ${number.isEmpty ? '-' : number}"
+                            : "رقم الملف: ${number.isEmpty ? '-' : number}",
                         textAlign: TextAlign.right,
                         style: TextStyle(
                           color: softTextColor,
@@ -175,6 +201,18 @@ class _DocumentsByStatusScreenState extends State<DocumentsByStatusScreen>
                           fontWeight: FontWeight.w600,
                         ),
                       ),
+                      if (parentNumber.isNotEmpty) ...[
+                        const SizedBox(height: 3),
+                        Text(
+                          "يتبع الملف: $parentNumber",
+                          textAlign: TextAlign.right,
+                          style: TextStyle(
+                            color: accentDarkColor,
+                            fontSize: 12.5,
+                            fontWeight: FontWeight.w700,
+                          ),
+                        ),
+                      ],
                       if (date.isNotEmpty) ...[
                         const SizedBox(height: 3),
                         Text(
@@ -186,8 +224,27 @@ class _DocumentsByStatusScreenState extends State<DocumentsByStatusScreen>
                           ),
                         ),
                       ],
+                      const SizedBox(height: 6),
+                      Wrap(
+                        alignment: WrapAlignment.end,
+                        spacing: 6,
+                        runSpacing: 6,
+                        children: [
+                          _buildSmallChip(
+                            isAttachment ? "كتاب تابع" : status,
+                            isAttachment
+                                ? Icons.attach_file_rounded
+                                : Icons.info_outline_rounded,
+                          ),
+                          if (category.isNotEmpty)
+                            _buildSmallChip(
+                              category,
+                              Icons.category_outlined,
+                            ),
+                        ],
+                      ),
                       if (notes.isNotEmpty) ...[
-                        const SizedBox(height: 3),
+                        const SizedBox(height: 6),
                         Text(
                           notes,
                           textAlign: TextAlign.right,
@@ -212,12 +269,38 @@ class _DocumentsByStatusScreenState extends State<DocumentsByStatusScreen>
     );
   }
 
+  Widget _buildSmallChip(String text, IconData icon) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 5),
+      decoration: BoxDecoration(
+        color: const Color(0xFFEFF7FF),
+        borderRadius: BorderRadius.circular(11),
+        border: Border.all(color: borderColor),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(icon, size: 14, color: accentDarkColor),
+          const SizedBox(width: 4),
+          Text(
+            text,
+            style: TextStyle(
+              color: accentDarkColor,
+              fontSize: 11.5,
+              fontWeight: FontWeight.w700,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
   Widget _buildHeader() {
     return Container(
       padding: const EdgeInsets.fromLTRB(18, 18, 18, 14),
       decoration: BoxDecoration(
-        gradient: LinearGradient(
-          colors: [const Color(0xFFEAF6FF), const Color(0xFFD6ECFF)],
+        gradient: const LinearGradient(
+          colors: [Color(0xFFEAF6FF), Color(0xFFD6ECFF)],
           begin: Alignment.topRight,
           end: Alignment.bottomLeft,
         ),
@@ -246,7 +329,7 @@ class _DocumentsByStatusScreenState extends State<DocumentsByStatusScreen>
                   ),
                   const SizedBox(height: 4),
                   Text(
-                    "الملفات مرتبة حسب الحالة",
+                    "الملفات مرتبة حسب الحالة والكتب التابعة",
                     style: TextStyle(
                       color: softTextColor,
                       fontSize: 13,
@@ -277,6 +360,7 @@ class _DocumentsByStatusScreenState extends State<DocumentsByStatusScreen>
             ),
             child: TabBar(
               controller: _tabController,
+              isScrollable: true,
               indicator: BoxDecoration(
                 gradient: _mainGradient,
                 borderRadius: BorderRadius.circular(14),
@@ -291,6 +375,7 @@ class _DocumentsByStatusScreenState extends State<DocumentsByStatusScreen>
                 Tab(text: "منجز"),
                 Tab(text: "قيد الإنجاز"),
                 Tab(text: "تم الاطلاع"),
+                Tab(text: "كتب تابعة"),
               ],
             ),
           ),
@@ -301,6 +386,11 @@ class _DocumentsByStatusScreenState extends State<DocumentsByStatusScreen>
 
   @override
   Widget build(BuildContext context) {
+    final doneDocs = _filterByStatus("منجز");
+    final inProgressDocs = _filterByStatus("قيد الإنجاز");
+    final viewedDocs = _filterByStatus("تم الاطلاع");
+    final attachments = _filterAttachments();
+
     return Directionality(
       textDirection: TextDirection.rtl,
       child: Scaffold(
@@ -317,11 +407,10 @@ class _DocumentsByStatusScreenState extends State<DocumentsByStatusScreen>
                     : TabBarView(
                         controller: _tabController,
                         children: [
-                          _buildList(_filterByStatus("منجز"), "منجز"),
-                          _buildList(
-                              _filterByStatus("قيد الإنجاز"), "قيد الإنجاز"),
-                          _buildList(
-                              _filterByStatus("تم الاطلاع"), "تم الاطلاع"),
+                          _buildList(doneDocs, "منجز"),
+                          _buildList(inProgressDocs, "قيد الإنجاز"),
+                          _buildList(viewedDocs, "تم الاطلاع"),
+                          _buildList(attachments, "الكتب التابعة"),
                         ],
                       ),
               ),

@@ -3,6 +3,7 @@ import 'dart:io';
 import 'dart:typed_data';
 import 'dart:ui' as ui;
 import 'package:flutter/material.dart';
+import 'package:file_picker/file_picker.dart';
 import 'package:http/http.dart' as http;
 import 'package:path/path.dart' as p;
 import 'package:pdf/pdf.dart';
@@ -12,6 +13,7 @@ import '../models/document_model.dart';
 import '../services/scanner_service.dart';
 import 'documents_by_status_screen.dart';
 import 'document_search_screen.dart';
+import 'reminders_screen.dart';
 
 class DocumentEntryScreen extends StatefulWidget {
   const DocumentEntryScreen({super.key});
@@ -54,12 +56,13 @@ class _DocumentEntryScreenState extends State<DocumentEntryScreen> {
   bool _isLoadingScanners = false;
   bool _isImportingTempImages = false;
   bool _isPrinting = false;
-  bool _isLoadingReminders = false;
+  bool _isLoadingParentDocuments = false;
   bool _isRefreshingApp = false;
 
   bool _isSubDocument = false;
   String _selectedStatus = 'قيد الإنجاز';
   String? _selectedCategory;
+  String? _selectedCommitteeFolderPath;
 
   final List<String> _categories = const [
     'عقوبات',
@@ -70,7 +73,6 @@ class _DocumentEntryScreenState extends State<DocumentEntryScreen> {
 
   DocumentModel? _savedDocument;
   DocumentModel? _selectedParentDocument;
-  List<DocumentModel> _dueReminders = [];
   List<DocumentModel> _parentDocumentOptions = [];
 
   final Color bgColor = const Color(0xFFEAF6FF);
@@ -122,10 +124,6 @@ class _DocumentEntryScreenState extends State<DocumentEntryScreen> {
     _loadScanners();
     _ensureArchiveRootExists();
     _ensureTempFolderExists();
-
-    WidgetsBinding.instance.addPostFrameCallback((_) async {
-      await _loadDueReminders(showDialogAfterLoad: true);
-    });
   }
 
   Future<void> _ensureArchiveRootExists() async {
@@ -167,324 +165,89 @@ class _DocumentEntryScreenState extends State<DocumentEntryScreen> {
         '${date.day.toString().padLeft(2, '0')}';
   }
 
-  bool _isReminderDue(String? reminderDateStr) {
-    if (reminderDateStr == null || reminderDateStr.trim().isEmpty) {
-      return false;
-    }
-
-    final reminderDate = DateTime.tryParse(reminderDateStr.trim());
-    if (reminderDate == null) {
-      return false;
-    }
-
-    final today = DateTime.now();
-    final todayOnly = DateTime(today.year, today.month, today.day);
-    final reminderOnly =
-        DateTime(reminderDate.year, reminderDate.month, reminderDate.day);
-
-    return !reminderOnly.isAfter(todayOnly);
-  }
-
-  Future<void> _loadDueReminders({bool showDialogAfterLoad = false}) async {
-    setState(() {
-      _isLoadingReminders = true;
-    });
-
-    try {
-      final allDocuments = await _fetchAllDocumentsFromApi();
-
-      final dueReminders = allDocuments.where((doc) {
-        return _isReminderDue(doc.reminderDate);
-      }).toList();
-
-      dueReminders.sort((a, b) {
-        final aDate = DateTime.tryParse(a.reminderDate ?? '') ??
-            DateTime(2100, 1, 1);
-        final bDate = DateTime.tryParse(b.reminderDate ?? '') ??
-            DateTime(2100, 1, 1);
-        return aDate.compareTo(bDate);
-      });
-
-      if (!mounted) return;
-
-      setState(() {
-        _dueReminders = dueReminders;
-      });
-
-      if (showDialogAfterLoad && dueReminders.isNotEmpty) {
-        _openRemindersDialog();
-      }
-    } catch (_) {
-      if (!mounted) return;
-      setState(() {
-        _dueReminders = [];
-      });
-    } finally {
-      if (mounted) {
-        setState(() {
-          _isLoadingReminders = false;
-        });
-      }
-    }
-  }
-
-  Future<void> _openReminderDetails(DocumentModel doc) async {
-    Navigator.of(context).pop();
-
-    setState(() {
-      _savedDocument = doc;
-    });
-
-    await _fillFormFromDocument(doc);
-
-    _showMessage('تم فتح تفاصيل الملف ${doc.documentNumber}');
-  }
-
-  void _openRemindersDialog() {
-    showDialog(
-      context: context,
-      builder: (_) => Dialog(
-        backgroundColor: Colors.transparent,
-        child: Container(
-          width: 620,
-          constraints: const BoxConstraints(maxHeight: 560),
-          padding: const EdgeInsets.all(16),
-          decoration: BoxDecoration(
-            gradient: _softGradient,
-            borderRadius: BorderRadius.circular(24),
-            border: Border.all(color: borderColor),
-            boxShadow: [
-              BoxShadow(
-                color: accentColor.withOpacity(0.12),
-                blurRadius: 18,
-                offset: const Offset(0, 6),
-              ),
-            ],
-          ),
-          child: Directionality(
-            textDirection: ui.TextDirection.rtl,
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Row(
-                  children: [
-                    Container(
-                      width: 44,
-                      height: 44,
-                      decoration: BoxDecoration(
-                        gradient: _mainGradient,
-                        borderRadius: BorderRadius.circular(14),
-                      ),
-                      child: const Icon(
-                        Icons.notifications_active_outlined,
-                        color: Colors.white,
-                      ),
-                    ),
-                    const SizedBox(width: 10),
-                    Expanded(
-                      child: Text(
-                        'لوحة التنبيهات',
-                        style: TextStyle(
-                          color: darkColor,
-                          fontSize: 20,
-                          fontWeight: FontWeight.w800,
-                        ),
-                      ),
-                    ),
-                    IconButton(
-                      onPressed: () => Navigator.pop(context),
-                      icon: Icon(Icons.close_rounded, color: darkColor),
-                    ),
-                  ],
-                ),
-                const SizedBox(height: 6),
-                Text(
-                  _dueReminders.isEmpty
-                      ? 'لا توجد تذكيرات مستحقة حاليًا'
-                      : 'عدد التذكيرات المستحقة: ${_dueReminders.length}',
-                  style: TextStyle(
-                    color: softTextColor,
-                    fontSize: 13.5,
-                    fontWeight: FontWeight.w600,
-                  ),
-                ),
-                const SizedBox(height: 14),
-                Expanded(
-                  child: _dueReminders.isEmpty
-                      ? Center(
-                          child: Text(
-                            'لا توجد تنبيهات حاليًا',
-                            style: TextStyle(
-                              color: softTextColor,
-                              fontSize: 15,
-                              fontWeight: FontWeight.w600,
-                            ),
-                          ),
-                        )
-                      : ListView.separated(
-                          itemCount: _dueReminders.length,
-                          separatorBuilder: (_, _) =>
-                              const SizedBox(height: 10),
-                          itemBuilder: (context, index) {
-                            final doc = _dueReminders[index];
-                            final isAttachment =
-                                doc.status.trim() == 'كتاب تابع';
-
-                            return InkWell(
-                              onTap: () => _openReminderDetails(doc),
-                              borderRadius: BorderRadius.circular(18),
-                              child: Container(
-                                padding: const EdgeInsets.all(14),
-                                decoration: BoxDecoration(
-                                  color: Colors.white.withOpacity(0.92),
-                                  borderRadius: BorderRadius.circular(18),
-                                  border: Border.all(color: borderColor),
-                                  boxShadow: [
-                                    BoxShadow(
-                                      color: accentColor.withOpacity(0.05),
-                                      blurRadius: 6,
-                                      offset: const Offset(0, 2),
-                                    ),
-                                  ],
-                                ),
-                                child: Row(
-                                  children: [
-                                    Container(
-                                      width: 48,
-                                      height: 48,
-                                      decoration: BoxDecoration(
-                                        gradient: _mainGradient,
-                                        borderRadius: BorderRadius.circular(14),
-                                      ),
-                                      child: Icon(
-                                        isAttachment
-                                            ? Icons.attach_file_rounded
-                                            : Icons.folder_copy_outlined,
-                                        color: Colors.white,
-                                      ),
-                                    ),
-                                    const SizedBox(width: 12),
-                                    Expanded(
-                                      child: Column(
-                                        crossAxisAlignment:
-                                            CrossAxisAlignment.end,
-                                        children: [
-                                          Text(
-                                            'ملف رقم ${doc.documentNumber}',
-                                            textAlign: TextAlign.right,
-                                            style: TextStyle(
-                                              color: darkColor,
-                                              fontSize: 14.5,
-                                              fontWeight: FontWeight.w800,
-                                            ),
-                                          ),
-                                          const SizedBox(height: 4),
-                                          Text(
-                                            doc.documentTitle,
-                                            textAlign: TextAlign.right,
-                                            style: TextStyle(
-                                              color: darkColor,
-                                              fontSize: 13.5,
-                                              fontWeight: FontWeight.w600,
-                                            ),
-                                          ),
-                                          if ((doc.reminderNote ?? '')
-                                              .trim()
-                                              .isNotEmpty) ...[
-                                            const SizedBox(height: 4),
-                                            Text(
-                                              doc.reminderNote!,
-                                              textAlign: TextAlign.right,
-                                              style: TextStyle(
-                                                color: softTextColor,
-                                                fontSize: 12.5,
-                                              ),
-                                            ),
-                                          ],
-                                        ],
-                                      ),
-                                    ),
-                                    const SizedBox(width: 10),
-                                    Column(
-                                      crossAxisAlignment:
-                                          CrossAxisAlignment.end,
-                                      children: [
-                                        Container(
-                                          padding: const EdgeInsets.symmetric(
-                                            horizontal: 10,
-                                            vertical: 6,
-                                          ),
-                                          decoration: BoxDecoration(
-                                            color: const Color(0xFFEFF7FF),
-                                            borderRadius:
-                                                BorderRadius.circular(12),
-                                            border: Border.all(
-                                              color: borderColor,
-                                            ),
-                                          ),
-                                          child: Text(
-                                            doc.reminderDate ?? '-',
-                                            style: TextStyle(
-                                              color: accentDarkColor,
-                                              fontSize: 12,
-                                              fontWeight: FontWeight.w700,
-                                            ),
-                                          ),
-                                        ),
-                                        const SizedBox(height: 8),
-                                        Text(
-                                          'فتح التفاصيل',
-                                          style: TextStyle(
-                                            color: accentColor,
-                                            fontSize: 12,
-                                            fontWeight: FontWeight.w700,
-                                          ),
-                                        ),
-                                      ],
-                                    ),
-                                  ],
-                                ),
-                              ),
-                            );
-                          },
-                        ),
-                ),
-                const SizedBox(height: 12),
-                Row(
-                  children: [
-                    Expanded(
-                      child: _buildOutlinedActionButton(
-                        onPressed: _isLoadingReminders
-                            ? null
-                            : () async {
-                                Navigator.pop(context);
-                                await _loadDueReminders();
-                                _openRemindersDialog();
-                              },
-                        label: _isLoadingReminders
-                            ? 'جاري التحديث...'
-                            : 'تحديث التنبيهات',
-                        icon: Icons.refresh_rounded,
-                        loading: _isLoadingReminders,
-                      ),
-                    ),
-                    const SizedBox(width: 10),
-                    Expanded(
-                      child: _buildActionButton(
-                        onPressed: () => Navigator.pop(context),
-                        label: 'إغلاق',
-                        icon: Icons.check_rounded,
-                      ),
-                    ),
-                  ],
-                ),
-              ],
-            ),
-          ),
-        ),
+  Future<void> _openRemindersScreen() async {
+    final result = await Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (_) => const RemindersScreen(),
       ),
     );
+
+    if (!mounted) return;
+
+    if (result is Map) {
+      final bool changed = result['changed'] == true;
+      final dynamic selectedDocument = result['document'];
+
+      if (changed) {
+        _showMessage('تم تحديث التنبيهات');
+      }
+
+      if (selectedDocument is DocumentModel) {
+        setState(() {
+          _savedDocument = selectedDocument;
+        });
+
+        await _fillFormFromDocument(selectedDocument);
+
+        if (!mounted) return;
+        _showMessage('تم فتح تفاصيل الملف ${selectedDocument.documentNumber}');
+      }
+    }
   }
+
+  String _committeeBaseFolderPath() {
+    final dateText = _documentDateController.text.trim();
+    final yearFolder = dateText.length >= 4
+        ? _safeFolderName(dateText.substring(0, 4))
+        : _safeFolderName(DateTime.now().year.toString());
+
+    return p.join(_archiveRootPath, yearFolder, 'محاضر لجان تحقيقية');
+  }
+
+  bool _isSelectedCommitteeFolderInsideBase(String selectedPath) {
+    final base = p.normalize(_committeeBaseFolderPath()).toLowerCase();
+    final selected = p.normalize(selectedPath).toLowerCase();
+
+    return selected == base || selected.startsWith('$base${Platform.pathSeparator}');
+  }
+
+  Future<void> _pickCommitteeFolder() async {
+    try {
+      final basePath = _committeeBaseFolderPath();
+      final baseDir = Directory(basePath);
+
+      if (!await baseDir.exists()) {
+        await baseDir.create(recursive: true);
+      }
+
+      final selectedPath = await FilePicker.platform.getDirectoryPath(
+        dialogTitle: 'اختاري أو أنشئي فولدر رئيس اللجنة',
+        initialDirectory: basePath,
+      );
+
+      if (selectedPath == null || selectedPath.trim().isEmpty) {
+        return;
+      }
+
+      if (!_isSelectedCommitteeFolderInsideBase(selectedPath)) {
+        _showMessage(
+          'يرجى اختيار فولدر داخل مسار محاضر لجان تحقيقية فقط',
+          isError: true,
+        );
+        return;
+      }
+
+      setState(() {
+        _selectedCommitteeFolderPath = selectedPath;
+      });
+
+      _showMessage('تم اختيار فولدر رئيس اللجنة: ${p.basename(selectedPath)}');
+    } catch (e) {
+      _showMessage('تعذر اختيار فولدر رئيس اللجنة: $e', isError: true);
+    }
+  }
+
 
   Future<List<String>> _getScannedFilesFromTempFolder() async {
     final directory = Directory(_tempFolderPath);
@@ -925,7 +688,7 @@ class _DocumentEntryScreenState extends State<DocumentEntryScreen> {
 
   Future<void> _loadParentDocumentOptions({bool showMessage = false}) async {
     setState(() {
-      _isLoadingReminders = true;
+      _isLoadingParentDocuments = true;
     });
 
     try {
@@ -971,7 +734,7 @@ class _DocumentEntryScreenState extends State<DocumentEntryScreen> {
     } finally {
       if (mounted) {
         setState(() {
-          _isLoadingReminders = false;
+          _isLoadingParentDocuments = false;
         });
       }
     }
@@ -1060,6 +823,7 @@ class _DocumentEntryScreenState extends State<DocumentEntryScreen> {
     required String subDocumentDate,
     required String subDocumentTitle,
     required String notes,
+    String? category,
     String? reminderDate,
     String? reminderNote,
     required String folderPath,
@@ -1076,6 +840,7 @@ class _DocumentEntryScreenState extends State<DocumentEntryScreen> {
         'sub_document_number': subDocumentNumber,
         'sub_document_date': subDocumentDate,
         'sub_document_title': subDocumentTitle,
+        'category': category,
         'notes': notes,
         'reminder_date': reminderDate,
         'reminder_note': reminderNote,
@@ -1178,6 +943,7 @@ class _DocumentEntryScreenState extends State<DocumentEntryScreen> {
       _isSubDocument = false;
       _selectedStatus = 'قيد الإنجاز';
       _selectedCategory = null;
+      _selectedCommitteeFolderPath = null;
 
       _documentNumberController.clear();
       _documentDateController.clear();
@@ -1207,6 +973,7 @@ class _DocumentEntryScreenState extends State<DocumentEntryScreen> {
       _isSubDocument = false;
       _selectedStatus = 'قيد الإنجاز';
       _selectedCategory = null;
+      _selectedCommitteeFolderPath = null;
 
       _documentNumberController.clear();
       _documentDateController.clear();
@@ -1225,11 +992,10 @@ class _DocumentEntryScreenState extends State<DocumentEntryScreen> {
       // تنظيف مجلد السحب المؤقت من صور قديمة
       await _clearTempFolder();
 
-      // إعادة تهيئة المجلدات والسكانر والتنبيهات
+      // إعادة تهيئة المجلدات والسكانر
       await _ensureArchiveRootExists();
       await _ensureTempFolderExists();
       await _loadScanners();
-      await _loadDueReminders();
 
       if (!mounted) return;
 
@@ -1270,6 +1036,7 @@ class _DocumentEntryScreenState extends State<DocumentEntryScreen> {
       _selectedCategory = _categories.contains(document.category)
           ? document.category
           : null;
+      _selectedCommitteeFolderPath = null;
       _reminderDateController.text = document.reminderDate ?? '';
       _reminderNoteController.text = document.reminderNote ?? '';
       _parentDocumentNumberController.text = document.documentNumber;
@@ -1316,7 +1083,24 @@ class _DocumentEntryScreenState extends State<DocumentEntryScreen> {
     // حتى إذا تكرر نفس الرقم مع تاريخ أو اسم مختلف ينحفظ بفولدر مستقل.
     final folderName = '${safeNumber}_${safeDate}_$safeTitle';
 
-    final mainFolderPath = p.join(_archiveRootPath, yearFolder, safeCategory, folderName);
+    String mainFolderPath;
+
+    if (category == 'محاضر لجان تحقيقية') {
+      if (_selectedCommitteeFolderPath == null ||
+          _selectedCommitteeFolderPath!.trim().isEmpty) {
+        throw Exception('يرجى اختيار أو إنشاء فولدر رئيس اللجنة');
+      }
+
+      mainFolderPath = p.join(_selectedCommitteeFolderPath!, folderName);
+    } else {
+      mainFolderPath = p.join(
+        _archiveRootPath,
+        yearFolder,
+        safeCategory,
+        folderName,
+      );
+    }
+
     final originalFolderPath = p.join(mainFolderPath, 'original');
 
     final mainFolder = Directory(mainFolderPath);
@@ -1525,8 +1309,19 @@ class _DocumentEntryScreenState extends State<DocumentEntryScreen> {
       return;
     }
 
-    if (!_isSubDocument && selectedCategory.isEmpty) {
-      _showMessage('يرجى اختيار تصنيف الملف', isError: true);
+    if (selectedCategory.isEmpty) {
+      _showMessage(
+        _isSubDocument ? 'يرجى اختيار تصنيف الكتاب التابع' : 'يرجى اختيار تصنيف الملف',
+        isError: true,
+      );
+      return;
+    }
+
+    if (!_isSubDocument &&
+        selectedCategory == 'محاضر لجان تحقيقية' &&
+        (_selectedCommitteeFolderPath == null ||
+            _selectedCommitteeFolderPath!.trim().isEmpty)) {
+      _showMessage('يرجى اختيار أو إنشاء فولدر رئيس اللجنة', isError: true);
       return;
     }
 
@@ -1582,6 +1377,7 @@ class _DocumentEntryScreenState extends State<DocumentEntryScreen> {
             subDocumentDate: documentDate,
             subDocumentTitle: documentTitle,
             notes: notes,
+            category: selectedCategory,
             reminderDate: reminderDate.isEmpty ? null : reminderDate,
             reminderNote: reminderNote.isEmpty ? null : reminderNote,
             folderPath: folderPath,
@@ -1598,6 +1394,7 @@ class _DocumentEntryScreenState extends State<DocumentEntryScreen> {
           documentNumber: subDocumentNumber,
           documentDate: documentDate,
           documentTitle: documentTitle,
+          category: selectedCategory,
           notes: notes,
           status: 'كتاب تابع',
           reminderDate: reminderDate.isEmpty ? null : reminderDate,
@@ -1674,10 +1471,6 @@ class _DocumentEntryScreenState extends State<DocumentEntryScreen> {
           isError: !apiSaved,
         );
       }
-
-      try {
-        await _loadDueReminders();
-      } catch (_) {}
 
       _clearScreenAfterSuccessfulSave();
     } catch (e) {
@@ -1900,64 +1693,18 @@ class _DocumentEntryScreenState extends State<DocumentEntryScreen> {
             width: 118,
             child: Row(
               children: [
-                Stack(
-                  clipBehavior: Clip.none,
-                  children: [
-                    IconButton(
-                      tooltip: 'التنبيهات',
-                      onPressed:
-                          _isLoadingReminders ? null : _openRemindersDialog,
-                      style: IconButton.styleFrom(
-                        backgroundColor: Colors.white.withOpacity(0.92),
-                        foregroundColor: accentColor,
-                        padding: const EdgeInsets.all(12),
-                      ),
-                      icon: _isLoadingReminders
-                          ? const SizedBox(
-                              width: 20,
-                              height: 20,
-                              child: CircularProgressIndicator(strokeWidth: 2),
-                            )
-                          : const Icon(
-                              Icons.notifications_none_rounded,
-                              size: 26,
-                            ),
-                    ),
-                    if (_dueReminders.isNotEmpty)
-                      Positioned(
-                        right: -2,
-                        top: -2,
-                        child: Container(
-                          constraints: const BoxConstraints(
-                            minWidth: 22,
-                            minHeight: 22,
-                          ),
-                          padding: const EdgeInsets.symmetric(
-                            horizontal: 5,
-                            vertical: 2,
-                          ),
-                          decoration: BoxDecoration(
-                            color: Colors.red.shade700,
-                            borderRadius: BorderRadius.circular(20),
-                            border: Border.all(
-                              color: Colors.white,
-                              width: 1.5,
-                            ),
-                          ),
-                          child: Text(
-                            _dueReminders.length > 99
-                                ? '99+'
-                                : '${_dueReminders.length}',
-                            textAlign: TextAlign.center,
-                            style: const TextStyle(
-                              color: Colors.white,
-                              fontSize: 10.5,
-                              fontWeight: FontWeight.w800,
-                            ),
-                          ),
-                        ),
-                      ),
-                  ],
+                IconButton(
+                  tooltip: 'التنبيهات',
+                  onPressed: _openRemindersScreen,
+                  style: IconButton.styleFrom(
+                    backgroundColor: Colors.white.withOpacity(0.92),
+                    foregroundColor: accentColor,
+                    padding: const EdgeInsets.all(12),
+                  ),
+                  icon: const Icon(
+                    Icons.notifications_none_rounded,
+                    size: 26,
+                  ),
                 ),
                 const SizedBox(width: 8),
                 IconButton(
@@ -2701,7 +2448,7 @@ class _DocumentEntryScreenState extends State<DocumentEntryScreen> {
           isExpanded: true,
           borderRadius: BorderRadius.circular(16),
           hint: Text(
-            'تصنيف الملف',
+            _isSubDocument ? 'تصنيف الكتاب التابع' : 'تصنيف الملف',
             textAlign: TextAlign.right,
             style: TextStyle(
               color: softTextColor.withOpacity(0.78),
@@ -2726,9 +2473,92 @@ class _DocumentEntryScreenState extends State<DocumentEntryScreen> {
           onChanged: (value) {
             setState(() {
               _selectedCategory = value;
+
+              if (value != 'محاضر لجان تحقيقية') {
+                _selectedCommitteeFolderPath = null;
+              }
             });
           },
         ),
+      ),
+    );
+  }
+
+
+  Widget _buildCommitteeFolderSelector() {
+    if (_isSubDocument || _selectedCategory != 'محاضر لجان تحقيقية') {
+      return const SizedBox.shrink();
+    }
+
+    final selectedName = _selectedCommitteeFolderPath == null
+        ? ''
+        : p.basename(_selectedCommitteeFolderPath!);
+
+    return Container(
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: Colors.white.withOpacity(0.88),
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: borderColor),
+        boxShadow: [
+          BoxShadow(
+            color: accentColor.withOpacity(0.04),
+            blurRadius: 6,
+            offset: const Offset(0, 2),
+          ),
+        ],
+      ),
+      child: Row(
+        children: [
+          Expanded(
+            child: _buildOutlinedActionButton(
+              onPressed: _pickCommitteeFolder,
+              label: _selectedCommitteeFolderPath == null
+                  ? 'اختيار / إنشاء فولدر رئيس اللجنة'
+                  : 'تغيير فولدر رئيس اللجنة',
+              icon: Icons.folder_open_rounded,
+              height: 46,
+            ),
+          ),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Container(
+              height: 46,
+              padding: const EdgeInsets.symmetric(horizontal: 12),
+              decoration: BoxDecoration(
+                color: const Color(0xFFEFF7FF),
+                borderRadius: BorderRadius.circular(14),
+                border: Border.all(color: borderColor),
+              ),
+              child: Row(
+                children: [
+                  Icon(
+                    Icons.account_tree_outlined,
+                    color: accentColor,
+                    size: 20,
+                  ),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Text(
+                      _selectedCommitteeFolderPath == null
+                          ? 'لم يتم اختيار فولدر رئيس اللجنة'
+                          : selectedName,
+                      textAlign: TextAlign.right,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        color: _selectedCommitteeFolderPath == null
+                            ? softTextColor
+                            : darkColor,
+                        fontSize: 13.2,
+                        fontWeight: FontWeight.w700,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ],
       ),
     );
   }
@@ -2760,7 +2590,7 @@ class _DocumentEntryScreenState extends State<DocumentEntryScreen> {
           isExpanded: true,
           borderRadius: BorderRadius.circular(16),
           hint: Text(
-            _isLoadingReminders
+            _isLoadingParentDocuments
                 ? 'جاري تحميل الملفات الأصلية...'
                 : 'اختر الملف الأصلي',
             textAlign: TextAlign.right,
@@ -2870,7 +2700,7 @@ class _DocumentEntryScreenState extends State<DocumentEntryScreen> {
                     height: 46,
                     child: IconButton(
                       tooltip: 'تحديث قائمة الملفات الأصلية',
-                      onPressed: _isLoadingReminders
+                      onPressed: _isLoadingParentDocuments
                           ? null
                           : () => _loadParentDocumentOptions(
                                 showMessage: true,
@@ -2883,7 +2713,7 @@ class _DocumentEntryScreenState extends State<DocumentEntryScreen> {
                           side: BorderSide(color: borderColor),
                         ),
                       ),
-                      icon: _isLoadingReminders
+                      icon: _isLoadingParentDocuments
                           ? const SizedBox(
                               width: 18,
                               height: 18,
@@ -2936,7 +2766,11 @@ class _DocumentEntryScreenState extends State<DocumentEntryScreen> {
                 hint: '12345',
               ),
               const SizedBox(height: 8),
-              _buildCategoryDropdown(),
+            ],
+            _buildCategoryDropdown(),
+            const SizedBox(height: 8),
+            if (_selectedCategory == 'محاضر لجان تحقيقية' && !_isSubDocument) ...[
+              _buildCommitteeFolderSelector(),
               const SizedBox(height: 8),
             ],
             Row(
