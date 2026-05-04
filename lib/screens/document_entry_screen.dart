@@ -1181,6 +1181,7 @@ class _DocumentEntryScreenState extends State<DocumentEntryScreen> {
     required String parentDocumentNumber,
     required String parentDocumentTitle,
     required String subDocumentNumber,
+    required String category,
   }) async {
     final parentFolderPath = await _findParentDocumentFolderPath(
       parentDocumentNumber,
@@ -1192,7 +1193,25 @@ class _DocumentEntryScreenState extends State<DocumentEntryScreen> {
     }
 
     final safeSubDocumentNumber = _safeFolderName(subDocumentNumber);
-    final attachmentFolderPath = p.join(parentFolderPath, safeSubDocumentNumber);
+
+    String attachmentFolderPath;
+
+    // إذا كان الكتاب التابع من تصنيف محاضر لجان تحقيقية
+    // نحفظه داخل فولدر رئيس اللجنة المختار، مثل الملف الرئيسي تماماً.
+    if (category == 'محاضر لجان تحقيقية') {
+      if (_selectedCommitteeFolderPath == null ||
+          _selectedCommitteeFolderPath!.trim().isEmpty) {
+        throw Exception('يرجى اختيار أو إنشاء فولدر رئيس اللجنة');
+      }
+
+      attachmentFolderPath = p.join(
+        _selectedCommitteeFolderPath!,
+        safeSubDocumentNumber,
+      );
+    } else {
+      attachmentFolderPath = p.join(parentFolderPath, safeSubDocumentNumber);
+    }
+
     final attachmentFolder = Directory(attachmentFolderPath);
 
     if (!await attachmentFolder.exists()) {
@@ -1317,8 +1336,7 @@ class _DocumentEntryScreenState extends State<DocumentEntryScreen> {
       return;
     }
 
-    if (!_isSubDocument &&
-        selectedCategory == 'محاضر لجان تحقيقية' &&
+    if (selectedCategory == 'محاضر لجان تحقيقية' &&
         (_selectedCommitteeFolderPath == null ||
             _selectedCommitteeFolderPath!.trim().isEmpty)) {
       _showMessage('يرجى اختيار أو إنشاء فولدر رئيس اللجنة', isError: true);
@@ -1357,6 +1375,7 @@ class _DocumentEntryScreenState extends State<DocumentEntryScreen> {
           parentDocumentNumber: parentDocumentNumber,
           parentDocumentTitle: parentDocumentTitle,
           subDocumentNumber: subDocumentNumber,
+          category: selectedCategory,
         );
 
         final movedImages = await _moveScannedFilesToDocumentFolder(
@@ -2486,7 +2505,7 @@ class _DocumentEntryScreenState extends State<DocumentEntryScreen> {
 
 
   Widget _buildCommitteeFolderSelector() {
-    if (_isSubDocument || _selectedCategory != 'محاضر لجان تحقيقية') {
+    if (_selectedCategory != 'محاضر لجان تحقيقية') {
       return const SizedBox.shrink();
     }
 
@@ -2769,7 +2788,7 @@ class _DocumentEntryScreenState extends State<DocumentEntryScreen> {
             ],
             _buildCategoryDropdown(),
             const SizedBox(height: 8),
-            if (_selectedCategory == 'محاضر لجان تحقيقية' && !_isSubDocument) ...[
+            if (_selectedCategory == 'محاضر لجان تحقيقية') ...[
               _buildCommitteeFolderSelector(),
               const SizedBox(height: 8),
             ],
