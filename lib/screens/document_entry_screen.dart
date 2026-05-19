@@ -785,6 +785,45 @@ class _DocumentEntryScreenState extends State<DocumentEntryScreen> {
     return result?['document'] as DocumentModel?;
   }
 
+
+  Future<void> _ensureParentDocumentSelectedFromNumber() async {
+    final typedNumber = _parentDocumentNumberController.text.trim();
+    if (typedNumber.isEmpty) return;
+
+    if (_parentDocumentOptions.isEmpty) {
+      await _loadParentDocumentOptions();
+    }
+
+    if (!mounted) return;
+
+    final normalizedTypedNumber = typedNumber.toLowerCase();
+
+    final exactMatches = _parentDocumentOptions.where((doc) {
+      return doc.documentNumber.trim().toLowerCase() == normalizedTypedNumber;
+    }).toList();
+
+    if (exactMatches.isEmpty) {
+      setState(() {
+        _selectedParentDocument = null;
+      });
+      return;
+    }
+
+    exactMatches.sort((a, b) {
+      final aDate = DateTime.tryParse(a.documentDate) ?? DateTime(1900, 1, 1);
+      final bDate = DateTime.tryParse(b.documentDate) ?? DateTime(1900, 1, 1);
+      return bDate.compareTo(aDate);
+    });
+
+    final selected = exactMatches.first;
+
+    setState(() {
+      _selectedParentDocument = selected;
+      _parentDocumentNumberController.text = selected.documentNumber;
+      _parentDocumentTitleController.text = selected.documentTitle;
+    });
+  }
+
   Future<void> _insertDocumentToApi(DocumentModel document) async {
     final uri = Uri.parse('$_apiBaseUrl/insert_document.php');
 
@@ -1118,63 +1157,111 @@ class _DocumentEntryScreenState extends State<DocumentEntryScreen> {
   }
 
   Future<String?> _findParentDocumentFolderPath(
-    String parentDocumentNumber, {
-    String? parentDocumentTitle,
+  String parentDocumentNumber, {
+  String? parentDocumentTitle,
+}) async {
+  final rootDir = Directory(_archiveRootPath);
+  if (!await rootDir.exists()) return null;
+
+  final selectedParent = _selectedParentDocument;
+  if (selectedParent != null &&
+      selectedParent.documentNumber.trim() == parentDocumentNumber.trim()) {
+    final selectedRootPath =
+        _resolveDocumentRootFolderPath(selectedParent.folderPath);
+
+    if (selectedRootPath.trim().isNotEmpty) {
+      final selectedRootDir = Directory(selectedRootPath);
+      if (await selectedRootDir.exists()) {
+        return selectedRootDir.path;
+      }
+    }
+  }
+
+  final safeParentNumber = _safeFolderName(parentDocumentNumber).toLowerCase();
+  final safeParentTitle = _safeFolderName(parentDocumentTitle ?? '').toLowerCase();
+
+  // دعم النسخ القديمة: D:\DocumentArchive\رقم_الملف
+  final oldDirectFolder = Directory(p.join(_archiveRootPath, parentDocumentNumber));
+  if (await oldDirectFolder.exists() && safeParentTitle.isEmpty) {
+    return oldDirectFolder.path;
+  }
+
+  final List<Directory> possibleFolders = [];
+
+  // البحث داخل كل D:\DocumentArchive بشكل recursive
+  await for (final entity in rootDir.list(recursive: true, followLinks: false)) {
+    if (entity is Directory) {
+      final folderName = p.basename(entity.path).toLowerCase();
+
+      // نتجنب فولدر original لأن المطلوب فولدر الملف الأب نفسه
+      if (folderName == 'original') continue;
+
+      final matchesNumber =
+          folderName == safeParentNumber || folderName.startsWith('${safeParentNumber}_');
+
+      final matchesTitle =
+          safeParentTitle.isEmpty || folderName.contains(safeParentTitle);
+
+      if (matchesNumber && matchesTitle) {
+        possibleFolders.add(entity);
+      }
+    }
+  }
+
+  if (possibleFolders.isEmpty) return null;
+
+  possibleFolders.sort((a, b) {
+    final aTime = a.statSync().modified;
+    final bTime = b.statSync().modified;
+    return bTime.compareTo(aTime);
+  });
+
+  return possibleFolders.first.path;
+}
+
+  Future<String> _createManualParentDocumentFolder({
+    required String parentDocumentNumber,
+    required String parentDocumentTitle,
+    required String category,
   }) async {
-    final rootDir = Directory(_archiveRootPath);
-    if (!await rootDir.exists()) return null;
+    final safeParentNumber = _safeFolderName(parentDocumentNumber);
+    final safeParentTitle = _safeFolderName(parentDocumentTitle);
+    final safeCategory = _safeFolderName(category);
+    final dateText = _documentDateController.text.trim();
 
-    final selectedParent = _selectedParentDocument;
-    if (selectedParent != null &&
-        selectedParent.documentNumber.trim() == parentDocumentNumber.trim()) {
-      final selectedRootPath = _resolveDocumentRootFolderPath(
-        selectedParent.folderPath,
+    final yearFolder = dateText.length >= 4
+        ? _safeFolderName(dateText.substring(0, 4))
+        : _safeFolderName(DateTime.now().year.toString());
+
+    final folderName = parentDocumentTitle.trim().isEmpty
+        ? safeParentNumber
+        : '${safeParentNumber}_$safeParentTitle';
+
+    String parentFolderPath;
+
+    if (category == 'محاضر لجان تحقيقية') {
+      if (_selectedCommitteeFolderPath == null ||
+          _selectedCommitteeFolderPath!.trim().isEmpty) {
+        throw Exception('يرجى اختيار أو إنشاء فولدر رئيس اللجنة');
+      }
+
+      parentFolderPath = p.join(_selectedCommitteeFolderPath!, folderName);
+    } else {
+      parentFolderPath = p.join(
+        _archiveRootPath,
+        yearFolder,
+        safeCategory,
+        folderName,
       );
-
-      if (selectedRootPath.trim().isNotEmpty) {
-        final selectedRootDir = Directory(selectedRootPath);
-        if (await selectedRootDir.exists()) {
-          return selectedRootDir.path;
-        }
-      }
     }
 
-    final safeParentNumber = _safeFolderName(parentDocumentNumber).toLowerCase();
-    final safeParentTitle =
-        _safeFolderName(parentDocumentTitle ?? '').toLowerCase();
+    final parentFolder = Directory(parentFolderPath);
 
-    // دعم النسخ القديمة التي كان اسم فولدرها رقم الملف فقط.
-    final oldDirectFolder =
-        Directory(p.join(_archiveRootPath, parentDocumentNumber));
-    if (await oldDirectFolder.exists() && safeParentTitle.isEmpty) {
-      return oldDirectFolder.path;
+    if (!await parentFolder.exists()) {
+      await parentFolder.create(recursive: true);
     }
 
-    final possibleFolders = <Directory>[];
-
-    for (final entity in rootDir.listSync()) {
-      if (entity is Directory) {
-        final folderName = p.basename(entity.path).toLowerCase();
-        final matchesNumber = folderName == safeParentNumber ||
-            folderName.startsWith('${safeParentNumber}_');
-        final matchesTitle =
-            safeParentTitle.isEmpty || folderName.contains(safeParentTitle);
-
-        if (matchesNumber && matchesTitle) {
-          possibleFolders.add(entity);
-        }
-      }
-    }
-
-    if (possibleFolders.isEmpty) return null;
-
-    possibleFolders.sort((a, b) {
-      final aTime = a.statSync().modified;
-      final bTime = b.statSync().modified;
-      return bTime.compareTo(aTime);
-    });
-
-    return possibleFolders.first.path;
+    return parentFolder.path;
   }
 
   Future<String> _createAttachmentFolder({
@@ -1183,14 +1270,17 @@ class _DocumentEntryScreenState extends State<DocumentEntryScreen> {
     required String subDocumentNumber,
     required String category,
   }) async {
-    final parentFolderPath = await _findParentDocumentFolderPath(
+    final existingParentFolderPath = await _findParentDocumentFolderPath(
       parentDocumentNumber,
       parentDocumentTitle: parentDocumentTitle,
     );
 
-    if (parentFolderPath == null || parentFolderPath.trim().isEmpty) {
-      throw Exception('الملف الأصلي غير موجود');
-    }
+    final parentFolderPath =
+        existingParentFolderPath ?? await _createManualParentDocumentFolder(
+          parentDocumentNumber: parentDocumentNumber,
+          parentDocumentTitle: parentDocumentTitle,
+          category: category,
+        );
 
     final safeSubDocumentNumber = _safeFolderName(subDocumentNumber);
 
@@ -1296,16 +1386,20 @@ class _DocumentEntryScreenState extends State<DocumentEntryScreen> {
     final selectedCategory = _selectedCategory?.trim() ?? '';
     final notes = _notesController.text.trim();
     final parentDocumentNumber = _parentDocumentNumberController.text.trim();
-    final parentDocumentTitle = _parentDocumentTitleController.text.trim();
+    String parentDocumentTitle = _parentDocumentTitleController.text.trim();
     final subDocumentNumber = _subDocumentNumberController.text.trim();
     final reminderDate = _reminderDateController.text.trim();
     final reminderNote = _reminderNoteController.text.trim();
 
     if (_isSubDocument) {
-      if (parentDocumentNumber.isEmpty || parentDocumentTitle.isEmpty) {
-        _showMessage('يرجى اختيار الملف الأصلي من القائمة', isError: true);
+      if (parentDocumentNumber.isEmpty) {
+        _showMessage('يرجى إدخال رقم الملف الأصلي', isError: true);
         return;
       }
+
+      await _ensureParentDocumentSelectedFromNumber();
+
+      parentDocumentTitle = _parentDocumentTitleController.text.trim();
 
       if (subDocumentNumber.isEmpty) {
         _showMessage('يرجى إدخال رقم الكتاب التابع', isError: true);
@@ -1356,21 +1450,8 @@ class _DocumentEntryScreenState extends State<DocumentEntryScreen> {
       await _ensureArchiveRootExists();
 
       if (_isSubDocument) {
-        // الكتاب التابع يعتمد على وجود فولدر الملف الأصلي داخل D:\DocumentArchive
-        // حتى لو لم يكن الملف الأصلي موجوداً داخل قاعدة البيانات.
-        final parentFolderPath = await _findParentDocumentFolderPath(
-          parentDocumentNumber,
-          parentDocumentTitle: parentDocumentTitle,
-        );
-
-        if (parentFolderPath == null || parentFolderPath.trim().isEmpty) {
-          _showMessage(
-            'الملف الأصلي غير موجود داخل D:\\DocumentArchive\nتأكدي من اختيار الملف الأصلي الصحيح من القائمة',
-            isError: true,
-          );
-          return;
-        }
-
+        // إذا كان الملف الأصلي موجوداً نضيف الكتاب التابع داخله.
+        // وإذا كُتب رقم ملف أصلي يدوي وغير موجود، ننشئ له فولدر آمن داخل D ثم نحفظ الكتاب التابع داخله.
         final folderPath = await _createAttachmentFolder(
           parentDocumentNumber: parentDocumentNumber,
           parentDocumentTitle: parentDocumentTitle,
@@ -1602,6 +1683,7 @@ class _DocumentEntryScreenState extends State<DocumentEntryScreen> {
     int maxLines = 1,
     bool readOnly = false,
     VoidCallback? onTap,
+    ValueChanged<String>? onChanged,
   }) {
     final bool isMultiline = maxLines > 1;
 
@@ -1624,6 +1706,7 @@ class _DocumentEntryScreenState extends State<DocumentEntryScreen> {
         minLines: isMultiline ? maxLines : 1,
         readOnly: readOnly,
         onTap: onTap,
+        onChanged: onChanged,
         textAlign: TextAlign.right,
         style: TextStyle(
           fontSize: 15,
@@ -2583,69 +2666,595 @@ class _DocumentEntryScreenState extends State<DocumentEntryScreen> {
   }
 
 
-  Widget _buildParentDocumentDropdown() {
-    final selectedValue =
-        _parentDocumentOptions.contains(_selectedParentDocument)
-            ? _selectedParentDocument
-            : null;
 
+  String _cleanArchiveTitle(String value) {
+    return value
+        .trim()
+        .replaceAll('_', ' ')
+        .replaceAll(RegExp(r'\s+'), ' ');
+  }
+
+  bool _isYearFolderName(String name) {
+    return RegExp(r'^\d{4}$').hasMatch(name.trim());
+  }
+
+  bool _isArchiveFolderSelectable(String folderPath) {
+    final normalized = p.normalize(folderPath);
+    final root = p.normalize(_archiveRootPath);
+    final folderName = p.basename(normalized).trim();
+
+    if (normalized.toLowerCase() == root.toLowerCase()) return false;
+    if (folderName.toLowerCase() == 'original') return false;
+    if (_isYearFolderName(folderName)) return false;
+    if (_categories.contains(folderName)) return false;
+
+    final hasLeadingNumber = RegExp(r'^\d+').hasMatch(folderName);
+    final hasOriginalFolder = Directory(p.join(normalized, 'original')).existsSync();
+
+    return hasLeadingNumber || hasOriginalFolder;
+  }
+
+  Map<String, String> _extractArchiveFolderInfo(String folderPath) {
+    String normalizedPath = _resolveDocumentRootFolderPath(folderPath);
+    if (normalizedPath.trim().isEmpty) {
+      normalizedPath = folderPath;
+    }
+
+    final folderName = p.basename(normalizedPath).trim();
+    final parts = folderName.split('_').where((part) => part.trim().isNotEmpty).toList();
+
+    if (parts.isEmpty) {
+      return {'number': '', 'title': ''};
+    }
+
+    final numberMatch = RegExp(r'^\d+').firstMatch(parts.first.trim());
+    final number = numberMatch?.group(0) ?? parts.first.trim();
+
+    int titleStartIndex = 1;
+    if (parts.length >= 3 && RegExp(r'^\d{4}-\d{2}-\d{2}$').hasMatch(parts[1].trim())) {
+      titleStartIndex = 2;
+    }
+
+    final title = parts.length > titleStartIndex
+        ? _cleanArchiveTitle(parts.skip(titleStartIndex).join(' '))
+        : '';
+
+    return {
+      'number': number,
+      'title': title,
+    };
+  }
+
+  Future<List<Directory>> _loadArchiveChildFolders(String folderPath) async {
+    final dir = Directory(folderPath);
+    if (!await dir.exists()) return [];
+
+    final folders = await dir
+        .list(followLinks: false)
+        .where((entity) => entity is Directory)
+        .cast<Directory>()
+        .toList();
+
+    folders.sort((a, b) {
+      final aName = p.basename(a.path).toLowerCase();
+      final bName = p.basename(b.path).toLowerCase();
+      return aName.compareTo(bName);
+    });
+
+    return folders;
+  }
+
+  String _archiveRelativePath(String folderPath) {
+    final normalizedRoot = p.normalize(_archiveRootPath);
+    final normalizedPath = p.normalize(folderPath);
+
+    if (normalizedPath.toLowerCase() == normalizedRoot.toLowerCase()) {
+      return 'D:\\DocumentArchive';
+    }
+
+    if (normalizedPath.toLowerCase().startsWith(normalizedRoot.toLowerCase())) {
+      final relative = normalizedPath.substring(normalizedRoot.length);
+      final cleaned = relative.replaceFirst(RegExp(r'^[\\/]+'), '');
+      return 'D:\\DocumentArchive${cleaned.isEmpty ? '' : '\\$cleaned'}';
+    }
+
+    return normalizedPath;
+  }
+
+  void _selectParentFolderFromArchive(String folderPath) {
+    final rootFolderPath = _resolveDocumentRootFolderPath(folderPath);
+    final selectedPath = rootFolderPath.trim().isEmpty ? folderPath : rootFolderPath;
+    final info = _extractArchiveFolderInfo(selectedPath);
+    final number = info['number'] ?? '';
+    final title = info['title'] ?? '';
+
+    if (number.trim().isEmpty) {
+      _showMessage('تعذر استخراج رقم الملف من اسم الفولدر', isError: true);
+      return;
+    }
+
+    setState(() {
+      _selectedParentDocument = null;
+      _parentDocumentNumberController.text = number.trim();
+      _parentDocumentTitleController.text = title.trim();
+    });
+
+    _showMessage('تم اختيار الملف الأصلي من الأرشيف');
+  }
+
+  Future<void> _showArchiveParentFolderPicker() async {
+    final rootDir = Directory(_archiveRootPath);
+    if (!await rootDir.exists()) {
+      _showMessage('مجلد الأرشيف غير موجود: $_archiveRootPath', isError: true);
+      return;
+    }
+
+    if (!mounted) return;
+
+    String currentPath = _archiveRootPath;
+    String searchText = '';
+    final searchController = TextEditingController();
+
+    await showDialog<void>(
+      context: context,
+      barrierDismissible: false,
+      builder: (dialogContext) {
+        return StatefulBuilder(
+          builder: (context, setDialogState) {
+            final canGoBack = p.normalize(currentPath).toLowerCase() !=
+                p.normalize(_archiveRootPath).toLowerCase();
+            final canSelectCurrent = _isArchiveFolderSelectable(currentPath);
+
+            return Directionality(
+              textDirection: ui.TextDirection.rtl,
+              child: AlertDialog(
+                backgroundColor: cardColor,
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(22),
+                  side: BorderSide(color: borderColor),
+                ),
+                titlePadding: const EdgeInsets.fromLTRB(18, 18, 18, 8),
+                contentPadding: const EdgeInsets.fromLTRB(18, 8, 18, 12),
+                actionsPadding: const EdgeInsets.fromLTRB(18, 0, 18, 14),
+                title: Row(
+                  children: [
+                    Icon(Icons.folder_open_rounded, color: accentColor),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: Text(
+                        'اختيار الملف الأصلي من الأرشيف',
+                        textAlign: TextAlign.right,
+                        style: TextStyle(
+                          color: darkColor,
+                          fontSize: 18,
+                          fontWeight: FontWeight.w800,
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+                content: SizedBox(
+                  width: 720,
+                  height: 520,
+                  child: Column(
+                    children: [
+                      Container(
+                        width: double.infinity,
+                        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                        decoration: BoxDecoration(
+                          gradient: _headerGradient,
+                          borderRadius: BorderRadius.circular(14),
+                          border: Border.all(color: borderColor),
+                        ),
+                        child: Row(
+                          children: [
+                            Icon(Icons.account_tree_outlined, color: accentColor, size: 20),
+                            const SizedBox(width: 8),
+                            Expanded(
+                              child: Text(
+                                _archiveRelativePath(currentPath),
+                                textAlign: TextAlign.right,
+                                overflow: TextOverflow.ellipsis,
+                                style: TextStyle(
+                                  color: darkColor,
+                                  fontSize: 13,
+                                  fontWeight: FontWeight.w700,
+                                ),
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                      const SizedBox(height: 10),
+                      Row(
+                        children: [
+                          SizedBox(
+                            width: 110,
+                            height: 44,
+                            child: OutlinedButton.icon(
+                              onPressed: canGoBack
+                                  ? () {
+                                      setDialogState(() {
+                                        currentPath = p.dirname(currentPath);
+                                        searchText = '';
+                                        searchController.clear();
+                                      });
+                                    }
+                                  : null,
+                              icon: const Icon(Icons.arrow_forward_rounded, size: 18),
+                              label: const Text('رجوع'),
+                              style: OutlinedButton.styleFrom(
+                                foregroundColor: darkColor,
+                                side: BorderSide(color: borderColor),
+                                shape: RoundedRectangleBorder(
+                                  borderRadius: BorderRadius.circular(14),
+                                ),
+                              ),
+                            ),
+                          ),
+                          const SizedBox(width: 8),
+                          Expanded(
+                            child: TextField(
+                              controller: searchController,
+                              textAlign: TextAlign.right,
+                              onChanged: (value) {
+                                setDialogState(() {
+                                  searchText = value.trim().toLowerCase();
+                                });
+                              },
+                              decoration: InputDecoration(
+                                hintText: 'بحث داخل الفولدر الحالي...',
+                                prefixIcon: Icon(Icons.search_rounded, color: accentColor),
+                                filled: true,
+                                fillColor: Colors.white.withOpacity(0.92),
+                                contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
+                                border: OutlineInputBorder(
+                                  borderRadius: BorderRadius.circular(14),
+                                  borderSide: BorderSide(color: borderColor),
+                                ),
+                                enabledBorder: OutlineInputBorder(
+                                  borderRadius: BorderRadius.circular(14),
+                                  borderSide: BorderSide(color: borderColor),
+                                ),
+                                focusedBorder: OutlineInputBorder(
+                                  borderRadius: BorderRadius.circular(14),
+                                  borderSide: BorderSide(color: accentColor, width: 1.4),
+                                ),
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 10),
+                      Expanded(
+                        child: FutureBuilder<List<Directory>>(
+                          future: _loadArchiveChildFolders(currentPath),
+                          builder: (context, snapshot) {
+                            if (snapshot.connectionState == ConnectionState.waiting) {
+                              return Center(
+                                child: Column(
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: [
+                                    CircularProgressIndicator(color: accentColor),
+                                    const SizedBox(height: 10),
+                                    Text(
+                                      'جاري تحميل الفولدرات...',
+                                      style: TextStyle(color: softTextColor, fontWeight: FontWeight.w700),
+                                    ),
+                                  ],
+                                ),
+                              );
+                            }
+
+                            final folders = (snapshot.data ?? []).where((folder) {
+                              if (searchText.isEmpty) return true;
+                              return p.basename(folder.path).toLowerCase().contains(searchText);
+                            }).toList();
+
+                            if (folders.isEmpty) {
+                              return Container(
+                                width: double.infinity,
+                                padding: const EdgeInsets.all(18),
+                                decoration: BoxDecoration(
+                                  color: Colors.white.withOpacity(0.86),
+                                  borderRadius: BorderRadius.circular(14),
+                                  border: Border.all(color: borderColor),
+                                ),
+                                child: Center(
+                                  child: Text(
+                                    'لا توجد فولدرات داخل هذا المسار',
+                                    style: TextStyle(
+                                      color: softTextColor,
+                                      fontSize: 14,
+                                      fontWeight: FontWeight.w700,
+                                    ),
+                                  ),
+                                ),
+                              );
+                            }
+
+                            return Container(
+                              decoration: BoxDecoration(
+                                color: Colors.white.withOpacity(0.88),
+                                borderRadius: BorderRadius.circular(14),
+                                border: Border.all(color: borderColor),
+                              ),
+                              child: ListView.separated(
+                                itemCount: folders.length,
+                                separatorBuilder: (_, _) => Divider(height: 1, color: borderColor.withOpacity(0.6)),
+                                itemBuilder: (context, index) {
+                                  final folder = folders[index];
+                                  final folderName = p.basename(folder.path);
+                                  final selectable = _isArchiveFolderSelectable(folder.path);
+                                  final hasOriginal = Directory(p.join(folder.path, 'original')).existsSync();
+
+                                  return Material(
+                                    color: Colors.transparent,
+                                    child: InkWell(
+                                      onTap: () {
+                                        setDialogState(() {
+                                          currentPath = folder.path;
+                                          searchText = '';
+                                          searchController.clear();
+                                        });
+                                      },
+                                      child: Padding(
+                                        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 9),
+                                        child: Row(
+                                          children: [
+                                            Icon(
+                                              hasOriginal ? Icons.snippet_folder_outlined : Icons.folder_outlined,
+                                              color: selectable ? accentColor : softTextColor,
+                                              size: 22,
+                                            ),
+                                            const SizedBox(width: 8),
+                                            Expanded(
+                                              child: Column(
+                                                crossAxisAlignment: CrossAxisAlignment.start,
+                                                children: [
+                                                  Text(
+                                                    folderName,
+                                                    textAlign: TextAlign.right,
+                                                    overflow: TextOverflow.ellipsis,
+                                                    style: TextStyle(
+                                                      color: darkColor,
+                                                      fontSize: 13.3,
+                                                      fontWeight: FontWeight.w800,
+                                                    ),
+                                                  ),
+                                                  if (selectable)
+                                                    Text(
+                                                      'يمكن اختياره كملف أصلي',
+                                                      textAlign: TextAlign.right,
+                                                      style: TextStyle(
+                                                        color: softTextColor,
+                                                        fontSize: 11.5,
+                                                        fontWeight: FontWeight.w600,
+                                                      ),
+                                                    ),
+                                                ],
+                                              ),
+                                            ),
+                                            const SizedBox(width: 8),
+                                            if (selectable)
+                                              TextButton.icon(
+                                                onPressed: () {
+                                                  _selectParentFolderFromArchive(folder.path);
+                                                  Navigator.pop(dialogContext);
+                                                },
+                                                icon: const Icon(Icons.check_circle_outline_rounded, size: 17),
+                                                label: const Text('اختيار'),
+                                                style: TextButton.styleFrom(
+                                                  foregroundColor: accentColor,
+                                                  textStyle: const TextStyle(fontWeight: FontWeight.w800),
+                                                ),
+                                              ),
+                                            Icon(Icons.chevron_left_rounded, color: softTextColor, size: 22),
+                                          ],
+                                        ),
+                                      ),
+                                    ),
+                                  );
+                                },
+                              ),
+                            );
+                          },
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+                actions: [
+                  TextButton(
+                    onPressed: () => Navigator.pop(dialogContext),
+                    child: const Text('إلغاء'),
+                  ),
+                  ElevatedButton.icon(
+                    onPressed: canSelectCurrent
+                        ? () {
+                            _selectParentFolderFromArchive(currentPath);
+                            Navigator.pop(dialogContext);
+                          }
+                        : null,
+                    icon: const Icon(Icons.check_rounded, size: 18),
+                    label: const Text('اختيار هذا الفولدر'),
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: accentColor,
+                      foregroundColor: Colors.white,
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(14),
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            );
+          },
+        );
+      },
+    );
+
+    searchController.dispose();
+  }
+
+  List<DocumentModel> _filteredParentDocumentOptions() {
+    final query = _parentDocumentNumberController.text.trim().toLowerCase();
+
+    if (query.isEmpty) {
+      return _parentDocumentOptions.take(6).toList();
+    }
+
+    final filtered = _parentDocumentOptions.where((doc) {
+      final number = doc.documentNumber.trim().toLowerCase();
+      final title = doc.documentTitle.trim().toLowerCase();
+      final date = doc.documentDate.trim().toLowerCase();
+
+      return number.contains(query) ||
+          title.contains(query) ||
+          date.contains(query);
+    }).toList();
+
+    return filtered.take(8).toList();
+  }
+
+  void _selectParentDocument(DocumentModel doc) {
+    setState(() {
+      _selectedParentDocument = doc;
+      _parentDocumentNumberController.text = doc.documentNumber;
+      _parentDocumentTitleController.text = doc.documentTitle;
+    });
+  }
+
+ Widget _buildParentDocumentSuggestions() {
+  final options = _filteredParentDocumentOptions();
+  final typedNumber = _parentDocumentNumberController.text.trim();
+
+  if (_isLoadingParentDocuments) {
     return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 2),
+      width: double.infinity,
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
       decoration: BoxDecoration(
         color: Colors.white.withOpacity(0.88),
-        borderRadius: BorderRadius.circular(16),
+        borderRadius: BorderRadius.circular(14),
         border: Border.all(color: borderColor),
-        boxShadow: [
-          BoxShadow(
-            color: accentColor.withOpacity(0.04),
-            blurRadius: 6,
-            offset: const Offset(0, 2),
-          ),
-        ],
       ),
-      child: DropdownButtonHideUnderline(
-        child: DropdownButton<DocumentModel>(
-          value: selectedValue,
-          isExpanded: true,
-          borderRadius: BorderRadius.circular(16),
-          hint: Text(
-            _isLoadingParentDocuments
-                ? 'جاري تحميل الملفات الأصلية...'
-                : 'اختر الملف الأصلي',
-            textAlign: TextAlign.right,
+      child: Row(
+        children: [
+          const SizedBox(
+            width: 16,
+            height: 16,
+            child: CircularProgressIndicator(strokeWidth: 2),
+          ),
+          const SizedBox(width: 8),
+          Text(
+            'جاري البحث عن الملفات الأصلية...',
             style: TextStyle(
-              color: softTextColor.withOpacity(0.78),
-              fontSize: 13.2,
+              color: softTextColor,
+              fontSize: 12.5,
               fontWeight: FontWeight.w700,
             ),
           ),
-          style: TextStyle(
-            color: darkColor,
-            fontSize: 14.2,
-            fontWeight: FontWeight.w600,
-          ),
-          items: _parentDocumentOptions.map((doc) {
-            return DropdownMenuItem<DocumentModel>(
-              value: doc,
-              child: Text(
-                '${doc.documentNumber} - ${doc.documentDate} - ${doc.documentTitle}',
-                textAlign: TextAlign.right,
-                overflow: TextOverflow.ellipsis,
-              ),
-            );
-          }).toList(),
-          onChanged: (doc) {
-            if (doc == null) return;
+        ],
+      ),
+    );
+  }
 
-            setState(() {
-              _selectedParentDocument = doc;
-              _parentDocumentNumberController.text = doc.documentNumber;
-              _parentDocumentTitleController.text = doc.documentTitle;
-            });
-          },
+  if (typedNumber.isNotEmpty && options.isEmpty) {
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+      decoration: BoxDecoration(
+        color: Colors.white.withOpacity(0.88),
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: borderColor),
+      ),
+      child: Text(
+        'لا توجد نتائج لهذا الرقم. يمكنك إدخال اسم الملف الأصلي يدويًا.',
+        textAlign: TextAlign.right,
+        style: TextStyle(
+          color: softTextColor,
+          fontSize: 12.5,
+          fontWeight: FontWeight.w700,
         ),
       ),
     );
+  }
+
+  if (options.isEmpty) return const SizedBox.shrink();
+
+  return Container(
+    width: double.infinity,
+    constraints: const BoxConstraints(maxHeight: 170),
+    decoration: BoxDecoration(
+      color: Colors.white.withOpacity(0.95),
+      borderRadius: BorderRadius.circular(14),
+      border: Border.all(color: borderColor),
+      boxShadow: [
+        BoxShadow(
+          color: accentColor.withOpacity(0.06),
+          blurRadius: 8,
+          offset: const Offset(0, 2),
+        ),
+      ],
+    ),
+    child: ListView.separated(
+      shrinkWrap: true,
+      padding: const EdgeInsets.symmetric(vertical: 4),
+      itemCount: options.length,
+      separatorBuilder: (_, _) => Divider(
+        height: 1,
+        color: borderColor.withOpacity(0.65),
+      ),
+      itemBuilder: (context, index) {
+        final doc = options[index];
+
+        final isSelected = _selectedParentDocument != null &&
+            _selectedParentDocument!.documentNumber == doc.documentNumber &&
+            _selectedParentDocument!.documentDate == doc.documentDate &&
+            _selectedParentDocument!.documentTitle == doc.documentTitle;
+
+        return Material(
+          color: isSelected
+              ? accentLightColor.withOpacity(0.16)
+              : Colors.transparent,
+          child: InkWell(
+            onTap: () => _selectParentDocument(doc),
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 9),
+              child: Row(
+                children: [
+                  Icon(
+                    isSelected
+                        ? Icons.check_circle_rounded
+                        : Icons.description_outlined,
+                    color: isSelected ? accentColor : softTextColor,
+                    size: 18,
+                  ),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Text(
+                      '${doc.documentNumber} - ${doc.documentDate} - ${doc.documentTitle}',
+                      textAlign: TextAlign.right,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        color: darkColor,
+                        fontSize: 13.2,
+                        fontWeight: FontWeight.w700,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        );
+      },
+    ),
+  );
+}
+
+  Widget _buildParentDocumentDropdown() {
+    return _buildParentDocumentSuggestions();
   }
 
   Widget _buildInfoCard() {
@@ -2711,7 +3320,23 @@ class _DocumentEntryScreenState extends State<DocumentEntryScreen> {
               Row(
                 children: [
                   Expanded(
-                    child: _buildParentDocumentDropdown(),
+                    child: _buildTextField(
+                      label: 'رقم الملف الأصلي',
+                      icon: Icons.account_tree_outlined,
+                      controller: _parentDocumentNumberController,
+                      hint: 'اكتبي رقم الملف الأصلي يدويًا',
+                      onChanged: (value) {
+                        setState(() {
+                          _selectedParentDocument = null;
+                        });
+
+                        if (_parentDocumentOptions.isEmpty &&
+                            value.trim().isNotEmpty &&
+                            !_isLoadingParentDocuments) {
+                          _loadParentDocumentOptions();
+                        }
+                      },
+                    ),
                   ),
                   const SizedBox(width: 8),
                   SizedBox(
@@ -2753,28 +3378,21 @@ class _DocumentEntryScreenState extends State<DocumentEntryScreen> {
                 ],
               ),
               const SizedBox(height: 8),
-              Row(
-                children: [
-                  Expanded(
-                    child: _buildTextField(
-                      label: 'رقم الملف الأصلي',
-                      icon: Icons.account_tree_outlined,
-                      controller: _parentDocumentNumberController,
-                      hint: 'يظهر تلقائيًا بعد الاختيار',
-                      readOnly: true,
-                    ),
-                  ),
-                  const SizedBox(width: 8),
-                  Expanded(
-                    child: _buildTextField(
-                      label: 'اسم الملف الأصلي',
-                      icon: Icons.drive_file_rename_outline,
-                      controller: _parentDocumentTitleController,
-                      hint: 'يظهر تلقائيًا بعد الاختيار',
-                      readOnly: true,
-                    ),
-                  ),
-                ],
+              _buildParentDocumentDropdown(),
+              const SizedBox(height: 8),
+              _buildOutlinedActionButton(
+                onPressed: _showArchiveParentFolderPicker,
+                label: 'اختيار الملف الأصلي من الأرشيف',
+                icon: Icons.folder_open_outlined,
+                height: 46,
+              ),
+              const SizedBox(height: 8),
+              _buildTextField(
+                label: 'اسم الملف الأصلي',
+                icon: Icons.drive_file_rename_outline,
+                controller: _parentDocumentTitleController,
+                hint: 'يظهر تلقائيًا بعد اختيار النتيجة، ويمكن إدخاله يدويًا عند عدم وجود الملف',
+                readOnly: false,
               ),
               const SizedBox(height: 8),
             ] else ...[

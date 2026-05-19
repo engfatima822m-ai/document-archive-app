@@ -9,8 +9,8 @@ class DocumentModel {
   final String? reminderDate;
   final String? reminderNote;
   final String folderPath;
-  final List<String> imagePaths;
-
+ 
+ final List<String> imagePaths;
   // حتى نعرف التنبيه من جدول documents لو document_attachments
   final String recordType;
 

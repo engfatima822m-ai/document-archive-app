@@ -7,6 +7,7 @@ class AttachmentModel {
   final String notes;
   final String folderPath;
   final List<String> imagePaths;
+  
 
   AttachmentModel({
     this.id,

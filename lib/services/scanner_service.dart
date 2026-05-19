@@ -2,10 +2,8 @@ import 'dart:async';
 import 'dart:io';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_twain_scanner/flutter_twain_scanner.dart';
-
 class ScannerService {
   FlutterTwainScanner? _scanner;
-
   /// 🔹 إعادة تهيئة السكانر (حل مشكلة التعليق)
   Future<void> _resetScanner() async {
     try {
