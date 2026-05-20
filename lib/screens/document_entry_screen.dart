@@ -42,6 +42,8 @@ class _DocumentEntryScreenState extends State<DocumentEntryScreen> {
   final ScannerService _scannerService = ScannerService();
 
   static const String _archiveRootPath = r'D:\DocumentArchive';
+  static const String _backupRootPath = r'E:\DocumentArchiveBackup';
+  static const String _databaseName = 'document_archive_db';
   static const String _tempFolderPath = r'C:\ScannedTemp';
   static const String _scannerExePath =
       r'C:\Program Files (x86)\Canon Electronics\CaptureOnTouch\TouchDR.exe';
@@ -58,6 +60,7 @@ class _DocumentEntryScreenState extends State<DocumentEntryScreen> {
   bool _isPrinting = false;
   bool _isLoadingParentDocuments = false;
   bool _isRefreshingApp = false;
+  bool _isBackingUp = false;
 
   bool _isSubDocument = false;
   String _selectedStatus = 'قيد الإنجاز';
@@ -997,6 +1000,190 @@ class _DocumentEntryScreenState extends State<DocumentEntryScreen> {
     });
   }
 
+
+  String _backupTimestamp() {
+    final now = DateTime.now();
+
+    return '${now.year.toString().padLeft(4, '0')}-'
+        '${now.month.toString().padLeft(2, '0')}-'
+        '${now.day.toString().padLeft(2, '0')}_'
+        '${now.hour.toString().padLeft(2, '0')}-'
+        '${now.minute.toString().padLeft(2, '0')}-'
+        '${now.second.toString().padLeft(2, '0')}';
+  }
+
+  Future<String> _findMySqlDumpPath() async {
+    final candidates = <String>[
+      r'C:\xampp\mysql\bin\mysqldump.exe',
+      r'C:\xampp8\mysql\bin\mysqldump.exe',
+      r'C:\Program Files\MySQL\MySQL Server 8.0\bin\mysqldump.exe',
+      r'C:\Program Files\MySQL\MySQL Server 5.7\bin\mysqldump.exe',
+    ];
+
+    for (final candidate in candidates) {
+      if (await File(candidate).exists()) {
+        return candidate;
+      }
+    }
+
+    final whereResult = await Process.run(
+      'where',
+      ['mysqldump'],
+      runInShell: true,
+    );
+
+    if (whereResult.exitCode == 0) {
+      final lines = whereResult.stdout
+          .toString()
+          .split(RegExp(r'\r?\n'))
+          .map((line) => line.trim())
+          .where((line) => line.isNotEmpty)
+          .toList();
+
+      if (lines.isNotEmpty) {
+        return lines.first;
+      }
+    }
+
+    throw Exception(
+      'لم يتم العثور على mysqldump. تأكدي من وجود XAMPP أو MySQL على الحاسبة.',
+    );
+  }
+
+  Future<String> _backupDatabaseToE(String databaseBackupFolderPath) async {
+    final databaseBackupDir = Directory(databaseBackupFolderPath);
+    if (!await databaseBackupDir.exists()) {
+      await databaseBackupDir.create(recursive: true);
+    }
+
+    final mysqldumpPath = await _findMySqlDumpPath();
+    final backupFilePath = p.join(
+      databaseBackupFolderPath,
+      '${_databaseName}_${_backupTimestamp()}.sql',
+    );
+
+    final result = await Process.run(
+      mysqldumpPath,
+      [
+        '--user=root',
+        '--host=127.0.0.1',
+        '--default-character-set=utf8mb4',
+        _databaseName,
+      ],
+      stdoutEncoding: null,
+      stderrEncoding: utf8,
+    );
+
+    if (result.exitCode != 0) {
+      final errorText = result.stderr.toString().trim();
+      throw Exception(
+        errorText.isEmpty
+            ? 'فشل تصدير قاعدة البيانات'
+            : 'فشل تصدير قاعدة البيانات: $errorText',
+      );
+    }
+
+    final stdoutData = result.stdout;
+    final bytes = stdoutData is List<int>
+        ? stdoutData
+        : utf8.encode(stdoutData.toString());
+
+    await File(backupFilePath).writeAsBytes(bytes, flush: true);
+
+    return backupFilePath;
+  }
+
+  Future<void> _backupArchiveIncrementallyToE(
+    String archiveBackupFolderPath,
+  ) async {
+    final sourceDir = Directory(_archiveRootPath);
+    if (!await sourceDir.exists()) {
+      throw Exception('مجلد الأرشيف الأصلي غير موجود: $_archiveRootPath');
+    }
+
+    final targetDir = Directory(archiveBackupFolderPath);
+    if (!await targetDir.exists()) {
+      await targetDir.create(recursive: true);
+    }
+
+    final result = await Process.run(
+      'robocopy',
+      [
+        _archiveRootPath,
+        archiveBackupFolderPath,
+        '/E',
+        '/XO',
+        '/FFT',
+        '/R:2',
+        '/W:2',
+        '/NP',
+      ],
+      runInShell: true,
+    );
+
+    // robocopy يعتبر الأكواد من 0 إلى 7 نجاحاً أو نجاحاً مع ملاحظات.
+    if (result.exitCode > 7) {
+      final errorText = result.stderr.toString().trim();
+      throw Exception(
+        errorText.isEmpty
+            ? 'فشل نسخ الأرشيف إلى E'
+            : 'فشل نسخ الأرشيف إلى E: $errorText',
+      );
+    }
+  }
+
+  Future<void> _createIncrementalBackup() async {
+    if (_isBackingUp) return;
+
+    if (!Platform.isWindows) {
+      _showMessage('ميزة النسخ الاحتياطي تعمل على Windows فقط', isError: true);
+      return;
+    }
+
+    final backupRootDir = Directory(_backupRootPath);
+    final backupDriveDir = Directory(r'E:\');
+
+    if (!await backupDriveDir.exists()) {
+      _showMessage('القرص E غير موجود. تأكدي من وجوده قبل النسخ الاحتياطي.', isError: true);
+      return;
+    }
+
+    setState(() {
+      _isBackingUp = true;
+    });
+
+    try {
+      if (!await backupRootDir.exists()) {
+        await backupRootDir.create(recursive: true);
+      }
+
+      final databaseBackupFolderPath = p.join(_backupRootPath, 'Database');
+      final archiveBackupFolderPath = p.join(_backupRootPath, 'DocumentArchive');
+
+      final databaseBackupFilePath =
+          await _backupDatabaseToE(databaseBackupFolderPath);
+
+      await _backupArchiveIncrementallyToE(archiveBackupFolderPath);
+
+      if (!mounted) return;
+
+      _showMessage(
+        'تم إنشاء النسخة الاحتياطية بنجاح على E\n'
+        'قاعدة البيانات: ${p.basename(databaseBackupFilePath)}\n'
+        'الأرشيف: $archiveBackupFolderPath',
+      );
+    } catch (e) {
+      if (!mounted) return;
+      _showMessage('حدث خطأ أثناء النسخ الاحتياطي: $e', isError: true);
+    } finally {
+      if (mounted) {
+        setState(() {
+          _isBackingUp = false;
+        });
+      }
+    }
+  }
+
   Future<void> _refreshApp() async {
     if (_isRefreshingApp) return;
 
@@ -1792,7 +1979,7 @@ class _DocumentEntryScreenState extends State<DocumentEntryScreen> {
       child: Row(
         children: [
           SizedBox(
-            width: 118,
+            width: 180,
             child: Row(
               children: [
                 IconButton(
@@ -1807,6 +1994,23 @@ class _DocumentEntryScreenState extends State<DocumentEntryScreen> {
                     Icons.notifications_none_rounded,
                     size: 26,
                   ),
+                ),
+                const SizedBox(width: 8),
+                IconButton(
+                  tooltip: 'نسخ احتياطي إلى E',
+                  onPressed: _isBackingUp ? null : _createIncrementalBackup,
+                  style: IconButton.styleFrom(
+                    backgroundColor: Colors.white.withOpacity(0.92),
+                    foregroundColor: accentColor,
+                    padding: const EdgeInsets.all(12),
+                  ),
+                  icon: _isBackingUp
+                      ? const SizedBox(
+                          width: 20,
+                          height: 20,
+                          child: CircularProgressIndicator(strokeWidth: 2),
+                        )
+                      : const Icon(Icons.backup_outlined, size: 26),
                 ),
                 const SizedBox(width: 8),
                 IconButton(
