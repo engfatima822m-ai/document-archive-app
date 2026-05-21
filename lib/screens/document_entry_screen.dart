@@ -1455,26 +1455,30 @@ class _DocumentEntryScreenState extends State<DocumentEntryScreen> {
     required String parentDocumentNumber,
     required String parentDocumentTitle,
     required String subDocumentNumber,
+    required String subDocumentDate,
+    required String subDocumentTitle,
     required String category,
   }) async {
-    final existingParentFolderPath = await _findParentDocumentFolderPath(
-      parentDocumentNumber,
-      parentDocumentTitle: parentDocumentTitle,
-    );
-
-    final parentFolderPath =
-        existingParentFolderPath ?? await _createManualParentDocumentFolder(
-          parentDocumentNumber: parentDocumentNumber,
-          parentDocumentTitle: parentDocumentTitle,
-          category: category,
-        );
-
     final safeSubDocumentNumber = _safeFolderName(subDocumentNumber);
+    final safeSubDocumentDate = _safeFolderName(subDocumentDate);
+    final safeSubDocumentTitle = _safeFolderName(subDocumentTitle);
+    final safeCategory = _safeFolderName(category);
+
+    final yearFolder = subDocumentDate.trim().length >= 4
+        ? _safeFolderName(subDocumentDate.trim().substring(0, 4))
+        : _safeFolderName(DateTime.now().year.toString());
+
+    // مهم:
+    // الكتاب التابع يبقى مرتبطاً بالكتاب الأصلي داخل قاعدة البيانات عن طريق:
+    // parent_document_number + parent_document_title
+    // لكن مكان حفظ الصور يكون حسب تصنيف الكتاب التابع نفسه، وليس داخل فولدر الأصل.
+    // هذا يسمح بأن يكون الأصل مثلاً "عقوبات" والتابع "كتب" بدون لخبطة بالمسارات.
+    final folderName = subDocumentTitle.trim().isEmpty
+        ? '${safeSubDocumentNumber}_$safeSubDocumentDate'
+        : '${safeSubDocumentNumber}_${safeSubDocumentDate}_$safeSubDocumentTitle';
 
     String attachmentFolderPath;
 
-    // إذا كان الكتاب التابع من تصنيف محاضر لجان تحقيقية
-    // نحفظه داخل فولدر رئيس اللجنة المختار، مثل الملف الرئيسي تماماً.
     if (category == 'محاضر لجان تحقيقية') {
       if (_selectedCommitteeFolderPath == null ||
           _selectedCommitteeFolderPath!.trim().isEmpty) {
@@ -1483,10 +1487,15 @@ class _DocumentEntryScreenState extends State<DocumentEntryScreen> {
 
       attachmentFolderPath = p.join(
         _selectedCommitteeFolderPath!,
-        safeSubDocumentNumber,
+        folderName,
       );
     } else {
-      attachmentFolderPath = p.join(parentFolderPath, safeSubDocumentNumber);
+      attachmentFolderPath = p.join(
+        _archiveRootPath,
+        yearFolder,
+        safeCategory,
+        folderName,
+      );
     }
 
     final attachmentFolder = Directory(attachmentFolderPath);
@@ -1637,12 +1646,14 @@ class _DocumentEntryScreenState extends State<DocumentEntryScreen> {
       await _ensureArchiveRootExists();
 
       if (_isSubDocument) {
-        // إذا كان الملف الأصلي موجوداً نضيف الكتاب التابع داخله.
-        // وإذا كُتب رقم ملف أصلي يدوي وغير موجود، ننشئ له فولدر آمن داخل D ثم نحفظ الكتاب التابع داخله.
+        // الكتاب التابع يبقى مربوطاً بالملف الأصلي داخل قاعدة البيانات.
+        // أما حفظ الصور فيكون حسب تصنيف الكتاب التابع نفسه، حتى لو اختلف عن تصنيف الأصل.
         final folderPath = await _createAttachmentFolder(
           parentDocumentNumber: parentDocumentNumber,
           parentDocumentTitle: parentDocumentTitle,
           subDocumentNumber: subDocumentNumber,
+          subDocumentDate: documentDate,
+          subDocumentTitle: documentTitle,
           category: selectedCategory,
         );
 
@@ -1671,8 +1682,8 @@ class _DocumentEntryScreenState extends State<DocumentEntryScreen> {
             imagePaths: movedImages,
           );
         } catch (_) {
-          // لا نلغي حفظ الصور إذا كانت قاعدة البيانات لا تحتوي الملف الأصلي.
-          // المهم أن الكتاب التابع صار محفوظاً داخل فولدر الملف الأصلي على D.
+          // لا نلغي حفظ الصور إذا تعذر تسجيل الربط في قاعدة البيانات.
+          // الصور محفوظة حسب تصنيف الكتاب التابع على D، لكن الربط يحتاج نجاح الـ API.
           apiSaved = false;
         }
 
@@ -1698,8 +1709,8 @@ class _DocumentEntryScreenState extends State<DocumentEntryScreen> {
 
         _showMessage(
           apiSaved
-              ? 'تم حفظ الكتاب التابع داخل الملف الأصلي بنجاح'
-              : 'تم حفظ الكتاب التابع داخل فولدر الملف الأصلي على D، لكن لم يتم تسجيله في قاعدة البيانات',
+              ? 'تم حفظ الكتاب التابع حسب تصنيفه وربطه بالكتاب الأصلي بنجاح'
+              : 'تم حفظ صور الكتاب التابع حسب تصنيفه على D، لكن لم يتم تسجيل الربط في قاعدة البيانات',
           isError: !apiSaved,
         );
       } else {
