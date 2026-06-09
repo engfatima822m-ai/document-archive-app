@@ -78,15 +78,15 @@ class _DocumentEntryScreenState extends State<DocumentEntryScreen> {
   DocumentModel? _selectedParentDocument;
   List<DocumentModel> _parentDocumentOptions = [];
 
-  final Color bgColor = const Color(0xFFEAF6FF);
-  final Color shellColor = const Color(0xFFD6ECFF);
+  final Color bgColor = const Color(0xFFF6F8FC);
+  final Color shellColor = const Color(0xFFEAF1FB);
   final Color cardColor = const Color(0xFFFFFFFF);
-  final Color accentColor = const Color(0xFF1976D2);
-  final Color accentLightColor = const Color(0xFF5CB6FF);
-  final Color accentDarkColor = const Color(0xFF0D47A1);
-  final Color darkColor = const Color(0xFF0D47A1);
-  final Color softTextColor = const Color(0xFF5F7FA6);
-  final Color borderColor = const Color(0xFFB8D9F7);
+  final Color accentColor = const Color(0xFF1E3A5F);
+  final Color accentLightColor = const Color(0xFF3B82F6);
+  final Color accentDarkColor = const Color(0xFF0F172A);
+  final Color darkColor = const Color(0xFF1E293B);
+  final Color softTextColor = const Color(0xFF64748B);
+  final Color borderColor = const Color(0xFFD6E2F0);
 
   String get _apiBaseUrl {
     if (Platform.isAndroid) {
@@ -105,8 +105,8 @@ class _DocumentEntryScreenState extends State<DocumentEntryScreen> {
 
   LinearGradient get _softGradient => const LinearGradient(
         colors: [
-          Color(0xFFF8FCFF),
-          Color(0xFFEAF6FF),
+          Color(0xFFFFFFFF),
+          Color(0xFFF8FAFC),
         ],
         begin: Alignment.topRight,
         end: Alignment.bottomLeft,
@@ -114,8 +114,8 @@ class _DocumentEntryScreenState extends State<DocumentEntryScreen> {
 
   LinearGradient get _headerGradient => const LinearGradient(
         colors: [
-          Color(0xFFECF7FF),
-          Color(0xFFD8EEFF),
+          Color(0xFFF8FAFC),
+          Color(0xFFDBEAFE),
         ],
         begin: Alignment.topRight,
         end: Alignment.bottomLeft,
@@ -824,6 +824,12 @@ class _DocumentEntryScreenState extends State<DocumentEntryScreen> {
       _selectedParentDocument = selected;
       _parentDocumentNumberController.text = selected.documentNumber;
       _parentDocumentTitleController.text = selected.documentTitle;
+
+      // القاعدة الجديدة: الكتاب التابع يأخذ تصنيف الملف الأصلي تلقائياً.
+      if (_isSubDocument && _categories.contains(selected.category)) {
+        _selectedCategory = selected.category;
+        _selectedCommitteeFolderPath = null;
+      }
     });
   }
 
@@ -1462,41 +1468,28 @@ class _DocumentEntryScreenState extends State<DocumentEntryScreen> {
     final safeSubDocumentNumber = _safeFolderName(subDocumentNumber);
     final safeSubDocumentDate = _safeFolderName(subDocumentDate);
     final safeSubDocumentTitle = _safeFolderName(subDocumentTitle);
-    final safeCategory = _safeFolderName(category);
 
-    final yearFolder = subDocumentDate.trim().length >= 4
-        ? _safeFolderName(subDocumentDate.trim().substring(0, 4))
-        : _safeFolderName(DateTime.now().year.toString());
+    // القاعدة الجديدة:
+    // الكتاب التابع لا ينشئ فولدراً مستقلاً حسب تصنيفه.
+    // دائماً ينحفظ داخل فولدر الملف الأصلي ثم داخل attachments.
+    final parentFolderPath = await _findParentDocumentFolderPath(
+      parentDocumentNumber,
+      parentDocumentTitle: parentDocumentTitle,
+    );
 
-    // مهم:
-    // الكتاب التابع يبقى مرتبطاً بالكتاب الأصلي داخل قاعدة البيانات عن طريق:
-    // parent_document_number + parent_document_title
-    // لكن مكان حفظ الصور يكون حسب تصنيف الكتاب التابع نفسه، وليس داخل فولدر الأصل.
-    // هذا يسمح بأن يكون الأصل مثلاً "عقوبات" والتابع "كتب" بدون لخبطة بالمسارات.
+    if (parentFolderPath == null || parentFolderPath.trim().isEmpty) {
+      throw Exception('لم يتم العثور على فولدر الملف الأصلي. اختاري الملف الأصلي من القائمة أو من الأرشيف أولاً.');
+    }
+
     final folderName = subDocumentTitle.trim().isEmpty
         ? '${safeSubDocumentNumber}_$safeSubDocumentDate'
         : '${safeSubDocumentNumber}_${safeSubDocumentDate}_$safeSubDocumentTitle';
 
-    String attachmentFolderPath;
-
-    if (category == 'محاضر لجان تحقيقية') {
-      if (_selectedCommitteeFolderPath == null ||
-          _selectedCommitteeFolderPath!.trim().isEmpty) {
-        throw Exception('يرجى اختيار أو إنشاء فولدر رئيس اللجنة');
-      }
-
-      attachmentFolderPath = p.join(
-        _selectedCommitteeFolderPath!,
-        folderName,
-      );
-    } else {
-      attachmentFolderPath = p.join(
-        _archiveRootPath,
-        yearFolder,
-        safeCategory,
-        folderName,
-      );
-    }
+    final attachmentFolderPath = p.join(
+      parentFolderPath,
+      'attachments',
+      folderName,
+    );
 
     final attachmentFolder = Directory(attachmentFolderPath);
 
@@ -1579,7 +1572,7 @@ class _DocumentEntryScreenState extends State<DocumentEntryScreen> {
     final documentNumber = _documentNumberController.text.trim();
     final documentDate = _documentDateController.text.trim();
     final documentTitle = _documentTitleController.text.trim();
-    final selectedCategory = _selectedCategory?.trim() ?? '';
+    String selectedCategory = _selectedCategory?.trim() ?? '';
     final notes = _notesController.text.trim();
     final parentDocumentNumber = _parentDocumentNumberController.text.trim();
     String parentDocumentTitle = _parentDocumentTitleController.text.trim();
@@ -1596,6 +1589,15 @@ class _DocumentEntryScreenState extends State<DocumentEntryScreen> {
       await _ensureParentDocumentSelectedFromNumber();
 
       parentDocumentTitle = _parentDocumentTitleController.text.trim();
+
+      final parentCategory = _selectedParentDocument?.category?.trim() ?? '';
+      if (parentCategory.isNotEmpty && _categories.contains(parentCategory)) {
+        selectedCategory = parentCategory;
+        setState(() {
+          _selectedCategory = parentCategory;
+          _selectedCommitteeFolderPath = null;
+        });
+      }
 
       if (subDocumentNumber.isEmpty) {
         _showMessage('يرجى إدخال رقم الكتاب التابع', isError: true);
@@ -1620,13 +1622,14 @@ class _DocumentEntryScreenState extends State<DocumentEntryScreen> {
 
     if (selectedCategory.isEmpty) {
       _showMessage(
-        _isSubDocument ? 'يرجى اختيار تصنيف الكتاب التابع' : 'يرجى اختيار تصنيف الملف',
+        _isSubDocument ? 'يرجى اختيار الملف الأصلي حتى يأخذ الكتاب التابع تصنيفه تلقائياً' : 'يرجى اختيار تصنيف الملف',
         isError: true,
       );
       return;
     }
 
-    if (selectedCategory == 'محاضر لجان تحقيقية' &&
+    if (!_isSubDocument &&
+        selectedCategory == 'محاضر لجان تحقيقية' &&
         (_selectedCommitteeFolderPath == null ||
             _selectedCommitteeFolderPath!.trim().isEmpty)) {
       _showMessage('يرجى اختيار أو إنشاء فولدر رئيس اللجنة', isError: true);
@@ -1647,7 +1650,7 @@ class _DocumentEntryScreenState extends State<DocumentEntryScreen> {
 
       if (_isSubDocument) {
         // الكتاب التابع يبقى مربوطاً بالملف الأصلي داخل قاعدة البيانات.
-        // أما حفظ الصور فيكون حسب تصنيف الكتاب التابع نفسه، حتى لو اختلف عن تصنيف الأصل.
+        // وحسب القاعدة الجديدة: الصور تنحفظ داخل فولدر الأصل ثم attachments.
         final folderPath = await _createAttachmentFolder(
           parentDocumentNumber: parentDocumentNumber,
           parentDocumentTitle: parentDocumentTitle,
@@ -1683,7 +1686,7 @@ class _DocumentEntryScreenState extends State<DocumentEntryScreen> {
           );
         } catch (_) {
           // لا نلغي حفظ الصور إذا تعذر تسجيل الربط في قاعدة البيانات.
-          // الصور محفوظة حسب تصنيف الكتاب التابع على D، لكن الربط يحتاج نجاح الـ API.
+          // الصور محفوظة داخل فولدر الأصل على D، لكن الربط يحتاج نجاح الـ API.
           apiSaved = false;
         }
 
@@ -1703,14 +1706,14 @@ class _DocumentEntryScreenState extends State<DocumentEntryScreen> {
 
         setState(() {
           _savedDocument = attachmentPreview;
-                      _scannedImagePaths = movedImages;
+          _scannedImagePaths = movedImages;
           _currentPreviewIndex = 0;
         });
 
         _showMessage(
           apiSaved
-              ? 'تم حفظ الكتاب التابع حسب تصنيفه وربطه بالكتاب الأصلي بنجاح'
-              : 'تم حفظ صور الكتاب التابع حسب تصنيفه على D، لكن لم يتم تسجيل الربط في قاعدة البيانات',
+              ? 'تم حفظ الكتاب التابع داخل فولدر الأصل وربطه بالملف الأصلي بنجاح'
+              : 'تم حفظ صور الكتاب التابع داخل فولدر الأصل، لكن لم يتم تسجيل الربط في قاعدة البيانات',
           isError: !apiSaved,
         );
       } else {
@@ -1758,7 +1761,7 @@ class _DocumentEntryScreenState extends State<DocumentEntryScreen> {
 
         setState(() {
           _savedDocument = document;
-                      _scannedImagePaths = movedImages;
+          _scannedImagePaths = movedImages;
           _currentPreviewIndex = 0;
         });
 
@@ -2662,6 +2665,13 @@ class _DocumentEntryScreenState extends State<DocumentEntryScreen> {
                     _parentDocumentTitleController.text =
                         _documentTitleController.text.trim();
                   }
+
+                  // إذا كان المستخدم فاتح ملفاً أصلياً وحوّل إلى كتاب تابع،
+                  // نحافظ على تصنيف الأصل ليستخدمه التابع تلقائياً.
+                  if (_savedDocument != null &&
+                      _categories.contains(_savedDocument!.category)) {
+                    _selectedCategory = _savedDocument!.category;
+                  }
                 });
 
                 if (_parentDocumentOptions.isEmpty) {
@@ -2787,15 +2797,17 @@ class _DocumentEntryScreenState extends State<DocumentEntryScreen> {
               ),
             );
           }).toList(),
-          onChanged: (value) {
-            setState(() {
-              _selectedCategory = value;
+          onChanged: (_isSubDocument && _selectedParentDocument != null)
+              ? null
+              : (value) {
+                  setState(() {
+                    _selectedCategory = value;
 
-              if (value != 'محاضر لجان تحقيقية') {
-                _selectedCommitteeFolderPath = null;
-              }
-            });
-          },
+                    if (value != 'محاضر لجان تحقيقية') {
+                      _selectedCommitteeFolderPath = null;
+                    }
+                  });
+                },
         ),
       ),
     );
@@ -2843,7 +2855,7 @@ class _DocumentEntryScreenState extends State<DocumentEntryScreen> {
               height: 46,
               padding: const EdgeInsets.symmetric(horizontal: 12),
               decoration: BoxDecoration(
-                color: const Color(0xFFEFF7FF),
+                color: const Color(0xFFEEF6FF),
                 borderRadius: BorderRadius.circular(14),
                 border: Border.all(color: borderColor),
               ),
@@ -2976,25 +2988,69 @@ class _DocumentEntryScreenState extends State<DocumentEntryScreen> {
     return normalizedPath;
   }
 
+  String? _extractCategoryFromArchivePath(String folderPath) {
+    final normalizedPath = p.normalize(folderPath);
+
+    for (final category in _categories) {
+      final safeCategory = _safeFolderName(category).toLowerCase();
+      final parts = p
+          .split(normalizedPath)
+          .map((part) => part.trim().toLowerCase())
+          .toList();
+
+      if (parts.contains(safeCategory) ||
+          parts.contains(category.trim().toLowerCase())) {
+        return category;
+      }
+    }
+
+    return null;
+  }
+
   void _selectParentFolderFromArchive(String folderPath) {
     final rootFolderPath = _resolveDocumentRootFolderPath(folderPath);
     final selectedPath = rootFolderPath.trim().isEmpty ? folderPath : rootFolderPath;
     final info = _extractArchiveFolderInfo(selectedPath);
     final number = info['number'] ?? '';
     final title = info['title'] ?? '';
+    final category = _extractCategoryFromArchivePath(selectedPath);
 
     if (number.trim().isEmpty) {
       _showMessage('تعذر استخراج رقم الملف من اسم الفولدر', isError: true);
       return;
     }
 
+    if (category == null || category.trim().isEmpty) {
+      _showMessage(
+        'تم اختيار الملف الأصلي، لكن تعذر تحديد تصنيفه من مسار الأرشيف',
+        isError: true,
+      );
+      return;
+    }
+
+    final parentPreview = DocumentModel(
+      id: null,
+      documentNumber: number.trim(),
+      documentDate: '',
+      documentTitle: title.trim(),
+      category: category,
+      notes: '',
+      status: 'قيد الإنجاز',
+      reminderDate: null,
+      reminderNote: null,
+      folderPath: selectedPath,
+      imagePaths: const [],
+    );
+
     setState(() {
-      _selectedParentDocument = null;
+      _selectedParentDocument = parentPreview;
       _parentDocumentNumberController.text = number.trim();
       _parentDocumentTitleController.text = title.trim();
+      _selectedCategory = category;
+      _selectedCommitteeFolderPath = null;
     });
 
-    _showMessage('تم اختيار الملف الأصلي من الأرشيف');
+    _showMessage('تم اختيار الملف الأصلي من الأرشيف وأخذ تصنيفه تلقائياً');
   }
 
   Future<void> _showArchiveParentFolderPicker() async {
@@ -3337,6 +3393,12 @@ class _DocumentEntryScreenState extends State<DocumentEntryScreen> {
       _selectedParentDocument = doc;
       _parentDocumentNumberController.text = doc.documentNumber;
       _parentDocumentTitleController.text = doc.documentTitle;
+
+      // عند اختيار ملف أصلي للكتاب التابع نأخذ تصنيف الأصل تلقائياً.
+      if (_isSubDocument && _categories.contains(doc.category)) {
+        _selectedCategory = doc.category;
+        _selectedCommitteeFolderPath = null;
+      }
     });
   }
 
@@ -3864,8 +3926,8 @@ class _DocumentEntryScreenState extends State<DocumentEntryScreen> {
                 decoration: BoxDecoration(
                   gradient: const LinearGradient(
                     colors: [
-                      Color(0xFFE9F7FF),
-                      Color(0xFFD4ECFF),
+                      Color(0xFFF8FAFC),
+                      Color(0xFFEAF2FF),
                     ],
                     begin: Alignment.topRight,
                     end: Alignment.bottomLeft,

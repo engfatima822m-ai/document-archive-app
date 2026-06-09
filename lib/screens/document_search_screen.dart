@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
@@ -24,6 +25,10 @@ class _DocumentSearchScreenState extends State<DocumentSearchScreen> {
 
   bool _isSearching = false;
   bool _isPrinting = false;
+
+  Timer? _searchDebounce;
+  int _activeSearchToken = 0;
+  List<_SearchGroup> _smartSearchGroups = [];
 
   DocumentModel? _searchedDocument;
   List<DocumentModel> _searchResults = [];
@@ -217,6 +222,74 @@ class _DocumentSearchScreenState extends State<DocumentSearchScreen> {
     return null;
   }
 
+
+  Future<List<_SearchGroup>> _searchDocumentsSmartInApi(String query) async {
+    final uri = Uri.parse('$_apiBaseUrl/search_documents.php').replace(
+      queryParameters: {'query': query},
+    );
+
+    final response = await http.get(uri);
+
+    if (response.statusCode != 200) {
+      throw Exception('search_documents.php غير متاح');
+    }
+
+    final data = jsonDecode(response.body);
+
+    if (data['success'] != true) {
+      throw Exception(data['message'] ?? 'فشل البحث الذكي');
+    }
+
+    final List rawGroups = data['groups'] ?? [];
+
+    if (rawGroups.isNotEmpty) {
+      return rawGroups.map((item) {
+        final groupMap = Map<String, dynamic>.from(item);
+        final parentMap = Map<String, dynamic>.from(
+          groupMap['parent'] ?? groupMap['document'] ?? {},
+        );
+
+        final parent = _documentFromJson(parentMap);
+
+        final List rawAttachments = groupMap['attachments'] ?? [];
+        final attachments = rawAttachments
+            .map((attachment) => _attachmentFromJson(
+                  Map<String, dynamic>.from(attachment),
+                ))
+            .toList();
+
+        attachments.sort((a, b) => b.documentDate.compareTo(a.documentDate));
+
+        return _SearchGroup(
+          parent: parent,
+          attachments: attachments,
+          matchText: (groupMap['match_text'] ?? '').toString(),
+        );
+      }).toList();
+    }
+
+    // دعم احتياطي إذا رجّع الـ API ملفاً واحداً مثل get_document_by_number.php
+    if (data['document'] != null) {
+      final parent = _documentFromJson(Map<String, dynamic>.from(data['document']));
+      final List rawAttachments = data['attachments'] ?? [];
+      final attachments = rawAttachments
+          .map((attachment) => _attachmentFromJson(
+                Map<String, dynamic>.from(attachment),
+              ))
+          .toList();
+
+      return [
+        _SearchGroup(
+          parent: parent,
+          attachments: attachments,
+          matchText: '',
+        )
+      ];
+    }
+
+    return [];
+  }
+
   Future<List<DocumentModel>> _searchDocumentsInApi(String query) async {
     final allDocuments = await _fetchAllDocumentsFromApi();
     final lowerQuery = query.toLowerCase();
@@ -341,23 +414,76 @@ class _DocumentSearchScreenState extends State<DocumentSearchScreen> {
     });
   }
 
-  Future<void> _searchDocument() async {
+  Future<void> _searchDocument({bool silent = false}) async {
     final query = _searchController.text.trim();
+
     if (query.isEmpty) {
-      _showMessage('يرجى إدخال رقم الملف أو كلمة للبحث', isError: true);
+      if (!silent) {
+        _showMessage('يرجى إدخال رقم الملف أو كلمة للبحث', isError: true);
+      }
+      setState(() {
+        _searchedDocument = null;
+        _searchResults = [];
+        _searchedAttachments = [];
+        _smartSearchGroups = [];
+        _previewImages = [];
+        _currentPreviewIndex = 0;
+      });
       return;
     }
+
+    final int searchToken = ++_activeSearchToken;
 
     setState(() => _isSearching = true);
 
     try {
+      // أولاً نحاول البحث الذكي الجديد من search_documents.php.
+      // إذا الملف غير موجود أو صار خلل، نرجع تلقائياً للبحث القديم حتى لا يتوقف النظام.
+      List<_SearchGroup> groups = [];
+
+      try {
+        groups = await _searchDocumentsSmartInApi(query);
+      } catch (_) {
+        groups = [];
+      }
+
+      if (searchToken != _activeSearchToken || !mounted) return;
+
+      if (groups.isNotEmpty) {
+        final firstGroup = groups.first;
+
+        setState(() {
+          _smartSearchGroups = groups;
+          _searchedDocument = firstGroup.parent;
+          _searchedAttachments = firstGroup.attachments;
+          _searchResults = groups.map((group) => group.parent).toList();
+        });
+
+        await _loadPreviewFor(firstGroup.parent);
+
+        if (!silent) {
+          _showMessage(
+            firstGroup.attachments.isEmpty
+                ? 'تم العثور على الملف'
+                : 'تم العثور على الملف ومعه ${firstGroup.attachments.length} كتاب تابع',
+          );
+        }
+        return;
+      }
+
+      // البحث القديم يبقى داعماً للبيانات السابقة ولحالة عدم وجود API البحث الجديد.
       final exactData = await _fetchDocumentWithAttachmentsFromApi(query);
       final exactDocument = exactData?['document'] as DocumentModel?;
-      final exactAttachments = (exactData?['attachments'] as List<DocumentModel>?) ?? [];
+      final exactAttachments =
+          (exactData?['attachments'] as List<DocumentModel>?) ?? [];
       final results = await _searchDocumentsInApi(query);
-      final selectedDocument = exactDocument ?? (results.isNotEmpty ? results.first : null);
+      final selectedDocument =
+          exactDocument ?? (results.isNotEmpty ? results.first : null);
+
+      if (searchToken != _activeSearchToken || !mounted) return;
 
       setState(() {
+        _smartSearchGroups = [];
         _searchedDocument = selectedDocument;
         _searchResults = results;
         _searchedAttachments = exactDocument != null ? exactAttachments : [];
@@ -365,37 +491,89 @@ class _DocumentSearchScreenState extends State<DocumentSearchScreen> {
 
       if (selectedDocument == null) {
         setState(() => _previewImages = []);
-        _showMessage('لم يتم العثور على نتيجة', isError: true);
+        if (!silent) {
+          _showMessage('لم يتم العثور على نتيجة', isError: true);
+        }
       } else {
         await _loadPreviewFor(selectedDocument);
-        _showMessage(_searchedAttachments.isEmpty
-            ? 'تم العثور على الملف'
-            : 'تم العثور على الملف ومعه ${_searchedAttachments.length} كتاب تابع');
+        if (!silent) {
+          _showMessage(_searchedAttachments.isEmpty
+              ? 'تم العثور على الملف'
+              : 'تم العثور على الملف ومعه ${_searchedAttachments.length} كتاب تابع');
+        }
       }
     } catch (e) {
-      _showMessage('حدث خطأ أثناء البحث: $e', isError: true);
+      if (!silent) {
+        _showMessage('حدث خطأ أثناء البحث: $e', isError: true);
+      }
     } finally {
-      if (mounted) setState(() => _isSearching = false);
+      if (mounted && searchToken == _activeSearchToken) {
+        setState(() => _isSearching = false);
+      }
     }
   }
 
+  void _onSearchTextChanged(String value) {
+    _searchDebounce?.cancel();
+
+    final query = value.trim();
+    if (query.isEmpty) {
+      _activeSearchToken++;
+      setState(() {
+        _searchedDocument = null;
+        _searchResults = [];
+        _searchedAttachments = [];
+        _smartSearchGroups = [];
+        _previewImages = [];
+        _currentPreviewIndex = 0;
+        _isSearching = false;
+      });
+      return;
+    }
+
+    _searchDebounce = Timer(const Duration(milliseconds: 450), () {
+      if (mounted) {
+        _searchDocument(silent: true);
+      }
+    });
+  }
+
   void _clearSearch() {
+    _searchDebounce?.cancel();
+    _activeSearchToken++;
     setState(() {
       _searchController.clear();
       _searchedDocument = null;
       _searchResults = [];
       _searchedAttachments = [];
+      _smartSearchGroups = [];
       _previewImages = [];
       _currentPreviewIndex = 0;
+      _isSearching = false;
     });
     _showMessage('تم مسح نتيجة البحث');
   }
 
   Future<void> _selectDocument(DocumentModel document) async {
+    final matchingSmartGroup = _smartSearchGroups.where((group) {
+      return _sameDocumentIdentity(group.parent, document);
+    }).toList();
+
+    if (matchingSmartGroup.isNotEmpty) {
+      final group = matchingSmartGroup.first;
+      setState(() {
+        _searchedDocument = group.parent;
+        _searchedAttachments = group.attachments;
+      });
+      await _loadPreviewFor(group.parent);
+      return;
+    }
+
     setState(() {
       _searchedDocument = document;
       _searchedAttachments = [];
     });
+
     if (document.status.trim() == 'كتاب تابع') {
       setState(() {
         _searchedAttachments = [];
@@ -406,6 +584,7 @@ class _DocumentSearchScreenState extends State<DocumentSearchScreen> {
         _searchedAttachments = attachments;
       });
     }
+
     await _loadPreviewFor(document);
   }
 
@@ -481,6 +660,7 @@ class _DocumentSearchScreenState extends State<DocumentSearchScreen> {
     required IconData icon,
     required TextEditingController controller,
     String? hint,
+    ValueChanged<String>? onChanged,
   }) {
     return Container(
       decoration: BoxDecoration(
@@ -491,6 +671,7 @@ class _DocumentSearchScreenState extends State<DocumentSearchScreen> {
       child: TextField(
         controller: controller,
         textAlign: TextAlign.right,
+        onChanged: onChanged,
         onSubmitted: (_) => _searchDocument(),
         style: TextStyle(fontSize: 15, color: darkColor, fontWeight: FontWeight.w600),
         decoration: InputDecoration(
@@ -579,7 +760,13 @@ class _DocumentSearchScreenState extends State<DocumentSearchScreen> {
         children: [
           _buildSectionTitle('البحث عن ملف', icon: Icons.search_rounded),
           const SizedBox(height: 10),
-          _buildTextField(label: 'رقم الملف أو نص البحث', icon: Icons.manage_search_rounded, controller: _searchController, hint: 'مثال: 12345 أو كلمة من الملاحظات'),
+          _buildTextField(
+            label: 'رقم الملف أو نص البحث',
+            icon: Icons.manage_search_rounded,
+            controller: _searchController,
+            hint: 'مثال: 12345 أو كلمة من الملاحظات',
+            onChanged: _onSearchTextChanged,
+          ),
           const SizedBox(height: 10),
           Row(
             children: [
@@ -698,7 +885,7 @@ class _DocumentSearchScreenState extends State<DocumentSearchScreen> {
                 ],
                 if (_searchResults.length > 1) ...[
                   const SizedBox(height: 10),
-                  Text('نتائج إضافية (${_searchResults.length})', style: TextStyle(fontSize: 13, fontWeight: FontWeight.w700, color: darkColor)),
+                  Text('نتائج مرتبطة (${_searchResults.length})', style: TextStyle(fontSize: 13, fontWeight: FontWeight.w700, color: darkColor)),
                   const SizedBox(height: 6),
                   ..._searchResults.take(8).map(
                         (doc) => Padding(
@@ -828,6 +1015,7 @@ class _DocumentSearchScreenState extends State<DocumentSearchScreen> {
 
   @override
   void dispose() {
+    _searchDebounce?.cancel();
     _searchController.dispose();
     super.dispose();
   }
@@ -879,6 +1067,18 @@ class _DocumentSearchScreenState extends State<DocumentSearchScreen> {
       ),
     );
   }
+}
+
+class _SearchGroup {
+  final DocumentModel parent;
+  final List<DocumentModel> attachments;
+  final String matchText;
+
+  const _SearchGroup({
+    required this.parent,
+    required this.attachments,
+    required this.matchText,
+  });
 }
 
 extension _DocumentCopy on DocumentModel {
