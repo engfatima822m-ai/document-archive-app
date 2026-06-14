@@ -1620,12 +1620,16 @@ class _DocumentEntryScreenState extends State<DocumentEntryScreen> {
       return;
     }
 
-    if (selectedCategory.isEmpty) {
-      _showMessage(
-        _isSubDocument ? 'يرجى اختيار الملف الأصلي حتى يأخذ الكتاب التابع تصنيفه تلقائياً' : 'يرجى اختيار تصنيف الملف',
-        isError: true,
-      );
+    if (!_isSubDocument && selectedCategory.isEmpty) {
+      _showMessage('يرجى اختيار تصنيف الملف', isError: true);
       return;
+    }
+
+    // تعديل خاص بالكتاب التابع فقط:
+    // إذا كان الملف الأصلي محدداً لكن تصنيفه غير موجود أو لم يرجع من قاعدة البيانات،
+    // لا نوقف الحفظ. نكمل الحفظ داخل فولدر الملف الأصلي ونرسل تصنيفاً احتياطياً للـ API.
+    if (_isSubDocument && selectedCategory.isEmpty) {
+      selectedCategory = 'كتب';
     }
 
     if (!_isSubDocument &&
