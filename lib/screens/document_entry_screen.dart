@@ -789,6 +789,148 @@ class _DocumentEntryScreenState extends State<DocumentEntryScreen> {
   }
 
 
+  Future<DocumentModel?> _chooseParentDocumentFromExactMatches(
+    List<DocumentModel> matches,
+  ) async {
+    if (!mounted) return null;
+
+    return showDialog<DocumentModel>(
+      context: context,
+      barrierDismissible: false,
+      builder: (dialogContext) {
+        return Directionality(
+          textDirection: ui.TextDirection.rtl,
+          child: AlertDialog(
+            backgroundColor: cardColor,
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(22),
+              side: BorderSide(color: borderColor),
+            ),
+            title: Row(
+              children: [
+                Icon(Icons.find_in_page_rounded, color: accentColor),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Text(
+                    'اختيار الملف الأصلي',
+                    textAlign: TextAlign.right,
+                    style: TextStyle(
+                      color: darkColor,
+                      fontSize: 18,
+                      fontWeight: FontWeight.w800,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+            content: SizedBox(
+              width: 520,
+              height: 360,
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  Text(
+                    'يوجد أكثر من ملف بنفس الرقم. اختاري الملف الأصلي المطلوب حتى يتم حفظ الكتاب التابع داخل فولدره الصحيح.',
+                    textAlign: TextAlign.right,
+                    style: TextStyle(
+                      color: softTextColor,
+                      fontSize: 13.5,
+                      fontWeight: FontWeight.w600,
+                      height: 1.5,
+                    ),
+                  ),
+                  const SizedBox(height: 12),
+                  Expanded(
+                    child: ListView.separated(
+                      itemCount: matches.length,
+                      separatorBuilder: (_, _) => const SizedBox(height: 8),
+                      itemBuilder: (context, index) {
+                        final doc = matches[index];
+                        final categoryText = doc.category?.trim() ?? '';
+                        final folderText = doc.folderPath.trim();
+
+                        return InkWell(
+                          borderRadius: BorderRadius.circular(14),
+                          onTap: () {
+                            Navigator.pop(dialogContext, doc);
+                          },
+                          child: Container(
+                            padding: const EdgeInsets.all(12),
+                            decoration: BoxDecoration(
+                              color: Colors.white.withOpacity(0.92),
+                              borderRadius: BorderRadius.circular(14),
+                              border: Border.all(color: borderColor),
+                            ),
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.end,
+                              children: [
+                                Text(
+                                  '${doc.documentNumber} - ${doc.documentTitle}',
+                                  textAlign: TextAlign.right,
+                                  style: TextStyle(
+                                    color: darkColor,
+                                    fontSize: 14.5,
+                                    fontWeight: FontWeight.w800,
+                                  ),
+                                ),
+                                const SizedBox(height: 6),
+                                Text(
+                                  'التاريخ: ${doc.documentDate.isEmpty ? 'غير محدد' : doc.documentDate}',
+                                  textAlign: TextAlign.right,
+                                  style: TextStyle(
+                                    color: softTextColor,
+                                    fontSize: 12.8,
+                                    fontWeight: FontWeight.w600,
+                                  ),
+                                ),
+                                const SizedBox(height: 4),
+                                Text(
+                                  'التصنيف: ${categoryText.isEmpty ? 'فارغ' : categoryText}',
+                                  textAlign: TextAlign.right,
+                                  style: TextStyle(
+                                    color: softTextColor,
+                                    fontSize: 12.8,
+                                    fontWeight: FontWeight.w600,
+                                  ),
+                                ),
+                                if (folderText.isNotEmpty) ...[
+                                  const SizedBox(height: 4),
+                                  Text(
+                                    folderText,
+                                    textAlign: TextAlign.right,
+                                    maxLines: 2,
+                                    overflow: TextOverflow.ellipsis,
+                                    style: TextStyle(
+                                      color: softTextColor.withOpacity(0.8),
+                                      fontSize: 11.5,
+                                      fontWeight: FontWeight.w500,
+                                    ),
+                                  ),
+                                ],
+                              ],
+                            ),
+                          ),
+                        );
+                      },
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            actions: [
+              TextButton(
+                onPressed: () {
+                  Navigator.pop(dialogContext, null);
+                },
+                child: const Text('إلغاء'),
+              ),
+            ],
+          ),
+        );
+      },
+    );
+  }
+
   Future<void> _ensureParentDocumentSelectedFromNumber() async {
     final typedNumber = _parentDocumentNumberController.text.trim();
     if (typedNumber.isEmpty) return;
@@ -818,16 +960,53 @@ class _DocumentEntryScreenState extends State<DocumentEntryScreen> {
       return bDate.compareTo(aDate);
     });
 
-    final selected = exactMatches.first;
+    DocumentModel? selected;
+
+    final currentSelected = _selectedParentDocument;
+    if (currentSelected != null &&
+        currentSelected.documentNumber.trim().toLowerCase() ==
+            normalizedTypedNumber) {
+      final stillExists = exactMatches.any((doc) {
+        return doc.documentNumber == currentSelected.documentNumber &&
+            doc.documentDate == currentSelected.documentDate &&
+            doc.documentTitle == currentSelected.documentTitle &&
+            doc.folderPath == currentSelected.folderPath;
+      });
+
+      if (stillExists) {
+        selected = currentSelected;
+      }
+    }
+
+    if (selected == null && exactMatches.length == 1) {
+      selected = exactMatches.first;
+    }
+
+    if (selected == null && exactMatches.length > 1) {
+      selected = await _chooseParentDocumentFromExactMatches(exactMatches);
+    }
+
+    if (!mounted) return;
+
+    if (selected == null) {
+      setState(() {
+        _selectedParentDocument = null;
+      });
+      return;
+    }
+
+    final selectedCategory = selected.category?.trim() ?? '';
 
     setState(() {
       _selectedParentDocument = selected;
-      _parentDocumentNumberController.text = selected.documentNumber;
+      _parentDocumentNumberController.text = selected!.documentNumber;
       _parentDocumentTitleController.text = selected.documentTitle;
 
-      // القاعدة الجديدة: الكتاب التابع يأخذ تصنيف الملف الأصلي تلقائياً.
-      if (_isSubDocument && _categories.contains(selected.category)) {
-        _selectedCategory = selected.category;
+      // الكتاب التابع يعتمد على رقم وفولدر الملف الأصلي.
+      // التصنيف إذا موجود ينحفظ، وإذا فارغ يبقى فارغ ولا يمنع الحفظ.
+      if (_isSubDocument) {
+        _selectedCategory =
+            selectedCategory.isEmpty ? null : selectedCategory;
         _selectedCommitteeFolderPath = null;
       }
     });
@@ -1265,9 +1444,10 @@ class _DocumentEntryScreenState extends State<DocumentEntryScreen> {
       _selectedStatus = ['قيد الإنجاز', 'منجز', 'تم الاطلاع'].contains(document.status)
           ? document.status
           : 'قيد الإنجاز';
-      _selectedCategory = _categories.contains(document.category)
-          ? document.category
-          : null;
+      _selectedCategory =
+          (document.category?.trim().isNotEmpty ?? false)
+              ? document.category?.trim()
+              : null;
       _selectedCommitteeFolderPath = null;
       _reminderDateController.text = document.reminderDate ?? '';
       _reminderNoteController.text = document.reminderNote ?? '';
@@ -1588,10 +1768,21 @@ class _DocumentEntryScreenState extends State<DocumentEntryScreen> {
 
       await _ensureParentDocumentSelectedFromNumber();
 
+      if (_selectedParentDocument == null && _parentDocumentOptions.where((doc) {
+        return doc.documentNumber.trim().toLowerCase() ==
+            parentDocumentNumber.toLowerCase();
+      }).length > 1) {
+        _showMessage(
+          'يوجد أكثر من ملف أصلي بنفس الرقم، يرجى اختيار الملف المطلوب من القائمة',
+          isError: true,
+        );
+        return;
+      }
+
       parentDocumentTitle = _parentDocumentTitleController.text.trim();
 
       final parentCategory = _selectedParentDocument?.category?.trim() ?? '';
-      if (parentCategory.isNotEmpty && _categories.contains(parentCategory)) {
+      if (parentCategory.isNotEmpty) {
         selectedCategory = parentCategory;
         setState(() {
           _selectedCategory = parentCategory;
@@ -1625,12 +1816,8 @@ class _DocumentEntryScreenState extends State<DocumentEntryScreen> {
       return;
     }
 
-    // تعديل خاص بالكتاب التابع فقط:
-    // إذا كان الملف الأصلي محدداً لكن تصنيفه غير موجود أو لم يرجع من قاعدة البيانات،
-    // لا نوقف الحفظ. نكمل الحفظ داخل فولدر الملف الأصلي ونرسل تصنيفاً احتياطياً للـ API.
-    if (_isSubDocument && selectedCategory.isEmpty) {
-      selectedCategory = 'كتب';
-    }
+    // الكتاب التابع لا يتوقف بسبب التصنيف.
+    // يعتمد على رقم الملف الأصلي وفولدره، والتصنيف إذا موجود ينحفظ وإذا فارغ يبقى فارغاً.
 
     if (!_isSubDocument &&
         selectedCategory == 'محاضر لجان تحقيقية' &&
@@ -2766,6 +2953,14 @@ class _DocumentEntryScreenState extends State<DocumentEntryScreen> {
   }
 
   Widget _buildCategoryDropdown() {
+    final selectedCategoryText = _selectedCategory?.trim() ?? '';
+    final dropdownCategories = List<String>.from(_categories);
+
+    if (selectedCategoryText.isNotEmpty &&
+        !dropdownCategories.contains(selectedCategoryText)) {
+      dropdownCategories.add(selectedCategoryText);
+    }
+
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 2),
       decoration: BoxDecoration(
@@ -2775,7 +2970,10 @@ class _DocumentEntryScreenState extends State<DocumentEntryScreen> {
       ),
       child: DropdownButtonHideUnderline(
         child: DropdownButton<String>(
-          value: _categories.contains(_selectedCategory) ? _selectedCategory : null,
+          value: selectedCategoryText.isNotEmpty &&
+                  dropdownCategories.contains(selectedCategoryText)
+              ? selectedCategoryText
+              : null,
           isExpanded: true,
           borderRadius: BorderRadius.circular(16),
           hint: Text(
@@ -2792,7 +2990,7 @@ class _DocumentEntryScreenState extends State<DocumentEntryScreen> {
             fontSize: 14.5,
             fontWeight: FontWeight.w600,
           ),
-          items: _categories.map((category) {
+          items: dropdownCategories.map((category) {
             return DropdownMenuItem<String>(
               value: category,
               child: Text(
@@ -3018,17 +3216,10 @@ class _DocumentEntryScreenState extends State<DocumentEntryScreen> {
     final number = info['number'] ?? '';
     final title = info['title'] ?? '';
     final category = _extractCategoryFromArchivePath(selectedPath);
+    final categoryText = category?.trim() ?? '';
 
     if (number.trim().isEmpty) {
       _showMessage('تعذر استخراج رقم الملف من اسم الفولدر', isError: true);
-      return;
-    }
-
-    if (category == null || category.trim().isEmpty) {
-      _showMessage(
-        'تم اختيار الملف الأصلي، لكن تعذر تحديد تصنيفه من مسار الأرشيف',
-        isError: true,
-      );
       return;
     }
 
@@ -3037,7 +3228,7 @@ class _DocumentEntryScreenState extends State<DocumentEntryScreen> {
       documentNumber: number.trim(),
       documentDate: '',
       documentTitle: title.trim(),
-      category: category,
+      category: categoryText.isEmpty ? null : categoryText,
       notes: '',
       status: 'قيد الإنجاز',
       reminderDate: null,
@@ -3050,11 +3241,15 @@ class _DocumentEntryScreenState extends State<DocumentEntryScreen> {
       _selectedParentDocument = parentPreview;
       _parentDocumentNumberController.text = number.trim();
       _parentDocumentTitleController.text = title.trim();
-      _selectedCategory = category;
+      _selectedCategory = categoryText.isEmpty ? null : categoryText;
       _selectedCommitteeFolderPath = null;
     });
 
-    _showMessage('تم اختيار الملف الأصلي من الأرشيف وأخذ تصنيفه تلقائياً');
+    _showMessage(
+      categoryText.isEmpty
+          ? 'تم اختيار الملف الأصلي من الأرشيف، والتصنيف فارغ'
+          : 'تم اختيار الملف الأصلي من الأرشيف وأخذ تصنيفه تلقائياً',
+    );
   }
 
   Future<void> _showArchiveParentFolderPicker() async {
@@ -3393,14 +3588,17 @@ class _DocumentEntryScreenState extends State<DocumentEntryScreen> {
   }
 
   void _selectParentDocument(DocumentModel doc) {
+    final categoryText = doc.category?.trim() ?? '';
+
     setState(() {
       _selectedParentDocument = doc;
       _parentDocumentNumberController.text = doc.documentNumber;
       _parentDocumentTitleController.text = doc.documentTitle;
 
-      // عند اختيار ملف أصلي للكتاب التابع نأخذ تصنيف الأصل تلقائياً.
-      if (_isSubDocument && _categories.contains(doc.category)) {
-        _selectedCategory = doc.category;
+      // عند اختيار ملف أصلي للكتاب التابع نأخذ التصنيف إذا موجود.
+      // إذا لم يوجد تصنيف يبقى الحقل فارغاً ولا يؤثر على الحفظ.
+      if (_isSubDocument) {
+        _selectedCategory = categoryText.isEmpty ? null : categoryText;
         _selectedCommitteeFolderPath = null;
       }
     });
