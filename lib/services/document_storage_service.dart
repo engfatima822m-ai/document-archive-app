@@ -1,289 +1,650 @@
 import 'dart:io';
+import 'dart:math';
+
+import 'package:crypto/crypto.dart';
+import 'package:pdf/pdf.dart';
+import 'package:pdf/widgets.dart' as pw;
+
 import '../models/attachment_model.dart';
 import '../models/document_model.dart';
+import 'api_service.dart';
+
+class PreparedArchivePdf {
+  final String absoluteFolderPath;
+  final String relativeFolderPath;
+
+  final String absolutePdfPath;
+  final String relativePdfPath;
+
+  final int fileSizeBytes;
+  final String sha256Hash;
+  final int pageCount;
+
+  const PreparedArchivePdf({
+    required this.absoluteFolderPath,
+    required this.relativeFolderPath,
+    required this.absolutePdfPath,
+    required this.relativePdfPath,
+    required this.fileSizeBytes,
+    required this.sha256Hash,
+    required this.pageCount,
+  });
+}
+
+class ArchiveStorageException
+    implements Exception {
+  final String message;
+
+  const ArchiveStorageException(
+    this.message,
+  );
+
+  @override
+  String toString() => message;
+}
+
 class DocumentStorageService {
-  // المسار الرئيسي للأرشيف على حاسبة الموظف
-  static const String baseArchivePath = r'D:\DocumentArchive';
+  DocumentStorageService._();
 
-  static final List<DocumentModel> _documents = [];
-  static final List<AttachmentModel> _attachments = [];
+  static const String baseArchivePath =
+      r'D:\DocumentArchive';
 
-  // =========================
-  // الأساسيات
-  // =========================
+  static const String scanTemporaryPath =
+      r'C:\ScannedTemp';
 
-  static Future<void> ensureBaseFolderExists() async {
-    final baseDir = Directory(baseArchivePath);
+  static const int maximumPages = 2000;
 
-    if (!await baseDir.exists()) {
-      await baseDir.create(recursive: true);
+  static final Random _secureRandom =
+      Random.secure();
+
+  /*
+  |--------------------------------------------------------------------------
+  | إنشاء مجلد الأرشيف الرئيسي
+  |--------------------------------------------------------------------------
+  */
+
+  static Future<void>
+      ensureBaseFolderExists() async {
+    final directory =
+        Directory(baseArchivePath);
+
+    if (!await directory.exists()) {
+      await directory.create(
+        recursive: true,
+      );
     }
   }
 
-  static String getDocumentFolderPath(String documentNumber) {
-    return '$baseArchivePath\\${documentNumber.trim()}';
+  /*
+  |--------------------------------------------------------------------------
+  | إنشاء UUID بدون مكتبة إضافية
+  |--------------------------------------------------------------------------
+  */
+
+  static String generateBatchId() {
+    final bytes = List<int>.generate(
+      16,
+      (_) => _secureRandom.nextInt(256),
+    );
+
+    bytes[6] =
+        (bytes[6] & 0x0F) | 0x40;
+
+    bytes[8] =
+        (bytes[8] & 0x3F) | 0x80;
+
+    String hex(int value) =>
+        value.toRadixString(16).padLeft(2, '0');
+
+    final value =
+        bytes.map(hex).join();
+
+    return '${value.substring(0, 8)}-'
+        '${value.substring(8, 12)}-'
+        '${value.substring(12, 16)}-'
+        '${value.substring(16, 20)}-'
+        '${value.substring(20, 32)}';
   }
 
-  static String getOriginalFolderPath(String documentNumber) {
-    return '${getDocumentFolderPath(documentNumber)}\\original';
-  }
+  /*
+  |--------------------------------------------------------------------------
+  | تنظيف أسماء المجلدات والملفات
+  |--------------------------------------------------------------------------
+  */
 
-  static String getAttachmentFolderPath({
-    required String parentDocumentNumber,
-    required String subDocumentNumber,
+  static String safePathPart(
+    String value, {
+    String fallback = 'document',
+    int maximumLength = 80,
   }) {
-    return '${getDocumentFolderPath(parentDocumentNumber)}\\${subDocumentNumber.trim()}';
-  }
+    var clean = value.trim();
 
-  static Future<bool> documentFolderExists(String documentNumber) async {
-    final dir = Directory(getDocumentFolderPath(documentNumber));
-    return await dir.exists();
-  }
-
-  static Future<bool> originalFolderExists(String documentNumber) async {
-    final dir = Directory(getOriginalFolderPath(documentNumber));
-    return await dir.exists();
-  }
-
-  static Future<bool> attachmentFolderExists({
-    required String parentDocumentNumber,
-    required String subDocumentNumber,
-  }) async {
-    final dir = Directory(
-      getAttachmentFolderPath(
-        parentDocumentNumber: parentDocumentNumber,
-        subDocumentNumber: subDocumentNumber,
-      ),
+    clean = clean.replaceAll(
+      RegExp(r'[<>:"/\\|?*\x00-\x1F]'),
+      '_',
     );
 
-    return await dir.exists();
-  }
-
-  // =========================
-  // إنشاء الفولدرات
-  // =========================
-
-  static Future<String> createDocumentFolder(String documentNumber) async {
-    await ensureBaseFolderExists();
-
-    final folderPath = getDocumentFolderPath(documentNumber);
-    final dir = Directory(folderPath);
-
-    if (await dir.exists()) {
-      throw Exception('الملف موجود مسبقاً');
-    }
-
-    await dir.create(recursive: true);
-    return folderPath;
-  }
-
-  static Future<String> createOriginalFolder(String documentNumber) async {
-    await ensureBaseFolderExists();
-
-    final mainFolder = Directory(getDocumentFolderPath(documentNumber));
-
-    if (!await mainFolder.exists()) {
-      await mainFolder.create(recursive: true);
-    }
-
-    final originalPath = getOriginalFolderPath(documentNumber);
-    final originalDir = Directory(originalPath);
-
-    if (!await originalDir.exists()) {
-      await originalDir.create(recursive: true);
-    }
-
-    return originalPath;
-  }
-
-  static Future<String> createAttachmentFolder({
-    required String parentDocumentNumber,
-    required String subDocumentNumber,
-  }) async {
-    final parentExists = await documentFolderExists(parentDocumentNumber);
-
-    if (!parentExists) {
-      throw Exception('الملف الأصلي غير موجود');
-    }
-
-    final attachmentPath = getAttachmentFolderPath(
-      parentDocumentNumber: parentDocumentNumber,
-      subDocumentNumber: subDocumentNumber,
+    clean = clean.replaceAll(
+      RegExp(r'\s+'),
+      ' ',
     );
 
-    final attachmentDir = Directory(attachmentPath);
-
-    if (await attachmentDir.exists()) {
-      throw Exception('الكتاب التابع موجود مسبقاً داخل هذا الملف');
+    while (
+        clean.endsWith('.') ||
+        clean.endsWith(' ')) {
+      clean = clean.substring(
+        0,
+        clean.length - 1,
+      );
     }
 
-    await attachmentDir.create(recursive: true);
-    return attachmentPath;
+    if (clean.isEmpty) {
+      clean = fallback;
+    }
+
+    if (clean.length > maximumLength) {
+      clean = clean.substring(
+        0,
+        maximumLength,
+      );
+    }
+
+    final reserved = <String>{
+      'CON',
+      'PRN',
+      'AUX',
+      'NUL',
+      'COM1',
+      'COM2',
+      'COM3',
+      'COM4',
+      'COM5',
+      'COM6',
+      'COM7',
+      'COM8',
+      'COM9',
+      'LPT1',
+      'LPT2',
+      'LPT3',
+      'LPT4',
+      'LPT5',
+      'LPT6',
+      'LPT7',
+      'LPT8',
+      'LPT9',
+    };
+
+    final baseName = clean
+        .split('.')
+        .first
+        .toUpperCase();
+
+    if (reserved.contains(baseName)) {
+      clean = '_$clean';
+    }
+
+    return clean;
   }
 
-  // =========================
-  // ترقيم الصور
-  // =========================
+  static String _yearFromDate(
+    String date,
+  ) {
+    final match = RegExp(
+      r'^\d{4}',
+    ).firstMatch(date.trim());
 
-  static bool _isImageFile(String path) {
-    final lower = path.toLowerCase();
+    return match?.group(0) ?? 'unknown';
+  }
+
+  static String buildMainRelativeFolder({
+    required String documentNumber,
+    required String documentDate,
+  }) {
+    final year =
+        _yearFromDate(documentDate);
+
+    final number = safePathPart(
+      documentNumber,
+      fallback: 'document',
+      maximumLength: 60,
+    );
+
+    final uniqueId =
+        generateBatchId();
+
+    return 'documents/$year/'
+        'document_${number}_$uniqueId';
+  }
+
+  static String
+      buildAttachmentRelativeFolder({
+    required int parentDocumentId,
+    required String subDocumentNumber,
+    required String subDocumentDate,
+  }) {
+    final year =
+        _yearFromDate(subDocumentDate);
+
+    final number = safePathPart(
+      subDocumentNumber,
+      fallback: 'attachment',
+      maximumLength: 60,
+    );
+
+    final uniqueId =
+        generateBatchId();
+
+    return 'attachments/'
+        '$parentDocumentId/'
+        '$year/'
+        'attachment_${number}_$uniqueId';
+  }
+
+  static String buildPdfFileName({
+    required String number,
+    required String title,
+  }) {
+    final safeNumber = safePathPart(
+      number,
+      fallback: 'document',
+      maximumLength: 45,
+    );
+
+    final safeTitle = safePathPart(
+      title,
+      fallback: 'archive',
+      maximumLength: 65,
+    );
+
+    return '${safeNumber}_$safeTitle.pdf';
+  }
+
+  /*
+  |--------------------------------------------------------------------------
+  | تحويل المسار النسبي إلى مسار Windows
+  |--------------------------------------------------------------------------
+  */
+
+  static String absolutePathFromRelative(
+    String relativePath,
+  ) {
+    final normalized = relativePath
+        .trim()
+        .replaceAll('\\', '/')
+        .replaceAll(
+          RegExp(r'^/+|/+$'),
+          '',
+        );
+
+    if (normalized.isEmpty) {
+      throw const ArchiveStorageException(
+        'المسار النسبي فارغ.',
+      );
+    }
+
+    final segments =
+        normalized.split('/');
+
+    if (segments.any(
+      (segment) =>
+          segment.isEmpty ||
+          segment == '.' ||
+          segment == '..',
+    )) {
+      throw const ArchiveStorageException(
+        'المسار النسبي غير آمن.',
+      );
+    }
+
+    return '$baseArchivePath\\'
+        '${segments.join('\\')}';
+  }
+
+  /*
+  |--------------------------------------------------------------------------
+  | التحقق من صور السكانر
+  |--------------------------------------------------------------------------
+  */
+
+  static bool _isSupportedImage(
+    String filePath,
+  ) {
+    final lower =
+        filePath.toLowerCase();
 
     return lower.endsWith('.jpg') ||
         lower.endsWith('.jpeg') ||
-        lower.endsWith('.png') ||
-        lower.endsWith('.bmp') ||
-        lower.endsWith('.webp');
+        lower.endsWith('.png');
   }
 
-  static int _extractImageNumber(String filePath) {
-    final fileName = filePath.split(Platform.pathSeparator).last;
-    final dotIndex = fileName.lastIndexOf('.');
-
-    final nameWithoutExtension =
-        dotIndex == -1 ? fileName : fileName.substring(0, dotIndex);
-
-    return int.tryParse(nameWithoutExtension) ?? 0;
-  }
-
-  static Future<int> getNextImageIndex(String folderPath) async {
-    final dir = Directory(folderPath);
-
-    if (!await dir.exists()) {
-      return 1;
+  static Future<List<File>>
+      _validateSourceImages(
+    List<String> sourceImagePaths,
+  ) async {
+    if (sourceImagePaths.isEmpty) {
+      throw const ArchiveStorageException(
+        'لا توجد صور لإنشاء ملف PDF.',
+      );
     }
 
-    final entities = await dir.list().toList();
-
-    final imageNumbers = entities
-        .whereType<File>()
-        .map((file) => file.path)
-        .where(_isImageFile)
-        .map(_extractImageNumber)
-        .where((number) => number > 0)
-        .toList();
-
-    if (imageNumbers.isEmpty) {
-      return 1;
+    if (
+        sourceImagePaths.length >
+        maximumPages) {
+      throw const ArchiveStorageException(
+        'عدد الصفحات يتجاوز الحد المسموح.',
+      );
     }
 
-    imageNumbers.sort();
-    return imageNumbers.last + 1;
+    final files = <File>[];
+    final usedPaths = <String>{};
+
+    for (
+      var index = 0;
+      index < sourceImagePaths.length;
+      index++
+    ) {
+      final sourcePath =
+          sourceImagePaths[index].trim();
+
+      if (sourcePath.isEmpty) {
+        throw ArchiveStorageException(
+          'مسار الصفحة رقم '
+          '${index + 1} غير صحيح.',
+        );
+      }
+
+      final file = File(sourcePath);
+
+      if (!await file.exists()) {
+        throw ArchiveStorageException(
+          'الصفحة رقم '
+          '${index + 1} غير موجودة.',
+        );
+      }
+
+      if (!_isSupportedImage(sourcePath)) {
+        throw ArchiveStorageException(
+          'صيغة الصفحة رقم '
+          '${index + 1} غير مدعومة.',
+        );
+      }
+
+      final normalizedPath =
+          file.absolute.path.toLowerCase();
+
+      if (!usedPaths.add(normalizedPath)) {
+        throw ArchiveStorageException(
+          'الصفحة رقم '
+          '${index + 1} مكررة.',
+        );
+      }
+
+      final fileSize =
+          await file.length();
+
+      if (
+          fileSize <= 0 ||
+          fileSize > 52428800) {
+        throw ArchiveStorageException(
+          'حجم الصفحة رقم '
+          '${index + 1} غير مسموح.',
+        );
+      }
+
+      files.add(file);
+    }
+
+    return files;
   }
 
-  static Future<List<String>> copyImagesToFolderSequentially({
+  /*
+  |--------------------------------------------------------------------------
+  | إنشاء PDF واحد من مجموعة صور
+  |--------------------------------------------------------------------------
+  */
+
+  static Future<PreparedArchivePdf>
+      createPdfFromImages({
     required List<String> sourceImagePaths,
-    required String targetFolderPath,
+    required String relativeFolderPath,
+    required String pdfFileName,
   }) async {
-    final targetDir = Directory(targetFolderPath);
+    await ensureBaseFolderExists();
 
-    if (!await targetDir.exists()) {
-      await targetDir.create(recursive: true);
+    final sourceFiles =
+        await _validateSourceImages(
+      sourceImagePaths,
+    );
+
+    final absoluteFolderPath =
+        absolutePathFromRelative(
+      relativeFolderPath,
+    );
+
+    final folderDirectory =
+        Directory(absoluteFolderPath);
+
+    if (await folderDirectory.exists()) {
+      throw const ArchiveStorageException(
+        'مجلد الأرشيف موجود مسبقًا.',
+      );
     }
 
-    int nextIndex = await getNextImageIndex(targetFolderPath);
-    final List<String> savedPaths = [];
+    await folderDirectory.create(
+      recursive: true,
+    );
 
-    for (final sourcePath in sourceImagePaths) {
-      final sourceFile = File(sourcePath);
+    final safePdfName =
+        safePathPart(
+      pdfFileName
+          .replaceFirst(
+            RegExp(
+              r'\.pdf$',
+              caseSensitive: false,
+            ),
+            '',
+          ),
+      fallback: 'archive_document',
+      maximumLength: 120,
+    );
 
-      if (!await sourceFile.exists()) {
-        continue;
+    final finalPdfName =
+        '$safePdfName.pdf';
+
+    final absolutePdfPath =
+        '$absoluteFolderPath\\'
+        '$finalPdfName';
+
+    final temporaryPdfPath =
+        '$absolutePdfPath.tmp';
+
+    final relativePdfPath =
+        '${relativeFolderPath.replaceAll('\\', '/')}/'
+        '$finalPdfName';
+
+    final pdf = pw.Document(
+      compress: true,
+    );
+
+    try {
+      for (
+        var index = 0;
+        index < sourceFiles.length;
+        index++
+      ) {
+        final imageBytes =
+            await sourceFiles[index]
+                .readAsBytes();
+
+        final image =
+            pw.MemoryImage(imageBytes);
+
+        pdf.addPage(
+          pw.Page(
+            pageFormat:
+                PdfPageFormat.a4,
+            margin:
+                const pw.EdgeInsets.all(12),
+            build: (_) {
+              return pw.Center(
+                child: pw.Image(
+                  image,
+                  fit: pw.BoxFit.contain,
+                ),
+              );
+            },
+          ),
+        );
       }
 
-      if (!_isImageFile(sourcePath)) {
-        continue;
+      final pdfBytes =
+          await pdf.save();
+
+      if (pdfBytes.isEmpty) {
+        throw const ArchiveStorageException(
+          'تعذر إنشاء ملف PDF.',
+        );
       }
 
-      final extension = sourcePath.split('.').last.toLowerCase();
-      final newPath = '$targetFolderPath\\$nextIndex.$extension';
+      final temporaryFile =
+          File(temporaryPdfPath);
 
-      final copiedFile = await sourceFile.copy(newPath);
-      savedPaths.add(copiedFile.path);
+      await temporaryFile.writeAsBytes(
+        pdfBytes,
+        flush: true,
+      );
 
-      nextIndex++;
-    }
+      final finalFile =
+          await temporaryFile.rename(
+        absolutePdfPath,
+      );
 
-    return savedPaths;
-  }
+      final fileSize =
+          await finalFile.length();
 
-  static Future<List<String>> moveImagesToFolderSequentially({
-    required List<String> sourceImagePaths,
-    required String targetFolderPath,
-  }) async {
-    final targetDir = Directory(targetFolderPath);
-
-    if (!await targetDir.exists()) {
-      await targetDir.create(recursive: true);
-    }
-
-    int nextIndex = await getNextImageIndex(targetFolderPath);
-    final List<String> savedPaths = [];
-
-    for (final sourcePath in sourceImagePaths) {
-      final sourceFile = File(sourcePath);
-
-      if (!await sourceFile.exists()) {
-        continue;
+      if (fileSize <= 0) {
+        throw const ArchiveStorageException(
+          'ملف PDF الناتج فارغ.',
+        );
       }
 
-      if (!_isImageFile(sourcePath)) {
-        continue;
-      }
+      final digest = await sha256
+          .bind(finalFile.openRead())
+          .first;
 
-      final extension = sourcePath.split('.').last.toLowerCase();
-      final newPath = '$targetFolderPath\\$nextIndex.$extension';
+      return PreparedArchivePdf(
+        absoluteFolderPath:
+            absoluteFolderPath,
+        relativeFolderPath:
+            relativeFolderPath
+                .replaceAll('\\', '/'),
+        absolutePdfPath:
+            absolutePdfPath,
+        relativePdfPath:
+            relativePdfPath,
+        fileSizeBytes: fileSize,
+        sha256Hash:
+            digest.toString(),
+        pageCount:
+            sourceFiles.length,
+      );
+    } catch (exception) {
+      final temporaryFile =
+          File(temporaryPdfPath);
 
-      try {
-        final movedFile = await sourceFile.rename(newPath);
-        savedPaths.add(movedFile.path);
-      } catch (_) {
-        // إذا فشل rename بسبب اختلاف القرص أو قفل الملف، نستخدم copy ثم delete
-        final copiedFile = await sourceFile.copy(newPath);
-        savedPaths.add(copiedFile.path);
-
+      if (await temporaryFile.exists()) {
         try {
-          await sourceFile.delete();
+          await temporaryFile.delete();
         } catch (_) {}
       }
 
-      nextIndex++;
+      final finalFile =
+          File(absolutePdfPath);
+
+      if (await finalFile.exists()) {
+        try {
+          await finalFile.delete();
+        } catch (_) {}
+      }
+
+      if (await folderDirectory.exists()) {
+        try {
+          await folderDirectory.delete(
+            recursive: true,
+          );
+        } catch (_) {}
+      }
+
+      if (
+          exception
+          is ArchiveStorageException) {
+        rethrow;
+      }
+
+      throw ArchiveStorageException(
+        'فشل تحويل الصور إلى PDF: '
+        '$exception',
+      );
     }
-
-    return savedPaths;
   }
 
-  // =========================
-  // الملفات الرئيسية
-  // =========================
+  /*
+  |--------------------------------------------------------------------------
+  | حذف صور السكانر المؤقتة فقط بعد نجاح الحفظ
+  |--------------------------------------------------------------------------
+  */
 
-  static Future<DocumentModel> createDocumentRecord({
-    required String documentNumber,
-    required String documentDate,
-    required String documentTitle,
-    required String notes,
-    required String status,
-    String? reminderDate,
-    String? reminderNote,
-    required String folderPath,
-    required List<String> imagePaths,
-  }) async {
-    final document = DocumentModel(
-      documentNumber: documentNumber.trim(),
-      documentDate: documentDate,
-      documentTitle: documentTitle,
-      notes: notes,
-      status: status,
-      reminderDate: reminderDate,
-      reminderNote: reminderNote,
-      folderPath: folderPath,
-      imagePaths: imagePaths,
-    );
+  static Future<void>
+      deleteSuccessfulScanImages(
+    List<String> sourceImagePaths,
+  ) async {
+    final scanRoot = Directory(
+      scanTemporaryPath,
+    ).absolute.path.toLowerCase();
 
-    _documents.add(document);
-    return document;
+    final safePrefix = scanRoot.endsWith(
+      Platform.pathSeparator,
+    )
+        ? scanRoot
+        : '$scanRoot'
+            '${Platform.pathSeparator}';
+
+    for (final sourcePath
+        in sourceImagePaths) {
+      final file = File(sourcePath);
+
+      if (!await file.exists()) {
+        continue;
+      }
+
+      final absolutePath =
+          file.absolute.path.toLowerCase();
+
+      if (!absolutePath.startsWith(
+        safePrefix,
+      )) {
+        // لا نحذف الصور التي اختارها
+        // الموظف من مجلد شخصي.
+        continue;
+      }
+
+      try {
+        await file.delete();
+      } catch (_) {
+        // بقاء صورة مؤقتة أفضل من
+        // حذف ملف غير مقصود.
+      }
+    }
   }
 
-  static Future<DocumentModel> createAndSaveMainDocument({
+  /*
+  |--------------------------------------------------------------------------
+  | حفظ ملف رئيسي من الصور
+  |--------------------------------------------------------------------------
+  */
+
+  static Future<DocumentModel>
+      saveMainDocumentFromImages({
     required String documentNumber,
     required String documentDate,
     required String documentTitle,
@@ -292,175 +653,180 @@ class DocumentStorageService {
     String? reminderDate,
     String? reminderNote,
     required List<String> sourceImagePaths,
-    bool moveFiles = false,
+    String scanMode =
+        'single_document',
+    String? scanBatchId,
   }) async {
-    final exists = await documentFolderExists(documentNumber);
+    final relativeFolder =
+        buildMainRelativeFolder(
+      documentNumber: documentNumber,
+      documentDate: documentDate,
+    );
 
-    if (exists) {
-      throw Exception('الملف موجود مسبقاً');
-    }
+    final pdfName =
+        buildPdfFileName(
+      number: documentNumber,
+      title: documentTitle,
+    );
 
-    final originalFolderPath = await createOriginalFolder(documentNumber);
-
-    final savedImagePaths = moveFiles
-        ? await moveImagesToFolderSequentially(
-            sourceImagePaths: sourceImagePaths,
-            targetFolderPath: originalFolderPath,
-          )
-        : await copyImagesToFolderSequentially(
-            sourceImagePaths: sourceImagePaths,
-            targetFolderPath: originalFolderPath,
-          );
+    final preparedPdf =
+        await createPdfFromImages(
+      sourceImagePaths:
+          sourceImagePaths,
+      relativeFolderPath:
+          relativeFolder,
+      pdfFileName: pdfName,
+    );
 
     final document = DocumentModel(
-      documentNumber: documentNumber.trim(),
-      documentDate: documentDate,
-      documentTitle: documentTitle,
-      notes: notes,
+      documentNumber:
+          documentNumber.trim(),
+      documentDate:
+          documentDate.trim(),
+      documentTitle:
+          documentTitle.trim(),
+      notes: notes.trim(),
       status: status,
       reminderDate: reminderDate,
       reminderNote: reminderNote,
-      folderPath: originalFolderPath,
-      imagePaths: savedImagePaths,
+      hasPdf: true,
+      relativeFolderPath:
+          preparedPdf.relativeFolderPath,
+      pdfRelativePath:
+          preparedPdf.relativePdfPath,
+      pdfSizeBytes:
+          preparedPdf.fileSizeBytes,
+      pdfSha256:
+          preparedPdf.sha256Hash,
+      pageCount:
+          preparedPdf.pageCount,
+      scanMode: scanMode,
+      scanBatchId: scanBatchId,
     );
 
-    _documents.add(document);
-    return document;
-  }
+    final response =
+        await ApiService.postJson(
+      'insert_document.php',
+      document.toCreateJson(),
+    );
 
-  static List<DocumentModel> getAllDocuments() {
-    return List.unmodifiable(_documents);
-  }
+    final savedValue =
+        response['document'];
 
-  static DocumentModel? getDocumentByNumber(String documentNumber) {
-    try {
-      return _documents.firstWhere(
-        (doc) => doc.documentNumber.trim() == documentNumber.trim(),
+    if (savedValue is! Map) {
+      throw const ApiException(
+        'لم يرجع الخادم بيانات الملف المحفوظ.',
       );
-    } catch (_) {
-      return null;
     }
-  }
 
-  static List<DocumentModel> searchDocuments(String query) {
-    final q = query.trim().toLowerCase();
-
-    if (q.isEmpty) return [];
-
-    return _documents.where((doc) {
-      return doc.documentNumber.toLowerCase().contains(q) ||
-          doc.documentTitle.toLowerCase().contains(q) ||
-          doc.notes.toLowerCase().contains(q);
-    }).toList();
-  }
-
-  // =========================
-  // الكتب التابعة
-  // =========================
-
-  static Future<AttachmentModel> createAttachmentRecord({
-    required String parentDocumentNumber,
-    required String subDocumentNumber,
-    required String subDocumentDate,
-    required String subDocumentTitle,
-    required String notes,
-    required String folderPath,
-    required List<String> imagePaths,
-  }) async {
-    final attachment = AttachmentModel(
-      parentDocumentNumber: parentDocumentNumber.trim(),
-      subDocumentNumber: subDocumentNumber.trim(),
-      subDocumentDate: subDocumentDate,
-      subDocumentTitle: subDocumentTitle,
-      notes: notes,
-      folderPath: folderPath,
-      imagePaths: imagePaths,
+    await deleteSuccessfulScanImages(
+      sourceImagePaths,
     );
 
-    _attachments.add(attachment);
-    return attachment;
+    return DocumentModel.fromJson(
+      Map<String, dynamic>.from(
+        savedValue,
+      ),
+    );
   }
 
-  static Future<AttachmentModel> appendSubDocumentToExistingDocument({
-    required String parentDocumentNumber,
+  /*
+  |--------------------------------------------------------------------------
+  | حفظ كتاب تابع من الصور
+  |--------------------------------------------------------------------------
+  */
+
+  static Future<AttachmentModel>
+      saveAttachmentFromImages({
+    required int parentDocumentId,
+    String? parentDocumentNumber,
+    String? parentDocumentTitle,
     required String subDocumentNumber,
     required String subDocumentDate,
     required String subDocumentTitle,
     required String notes,
+    String? reminderDate,
+    String? reminderNote,
     required List<String> sourceImagePaths,
-    bool moveFiles = false,
   }) async {
-    final parentExists = await documentFolderExists(parentDocumentNumber);
-
-    if (!parentExists) {
-      throw Exception('الملف الأصلي غير موجود');
-    }
-
-    final subFolderExists = await attachmentFolderExists(
-      parentDocumentNumber: parentDocumentNumber,
-      subDocumentNumber: subDocumentNumber,
+    final relativeFolder =
+        buildAttachmentRelativeFolder(
+      parentDocumentId:
+          parentDocumentId,
+      subDocumentNumber:
+          subDocumentNumber,
+      subDocumentDate:
+          subDocumentDate,
     );
 
-    if (subFolderExists) {
-      throw Exception('يوجد كتاب تابع بنفس الرقم داخل هذا الملف');
-    }
-
-    final attachmentFolderPath = await createAttachmentFolder(
-      parentDocumentNumber: parentDocumentNumber,
-      subDocumentNumber: subDocumentNumber,
+    final pdfName =
+        buildPdfFileName(
+      number: subDocumentNumber,
+      title: subDocumentTitle,
     );
 
-    final savedImagePaths = moveFiles
-        ? await moveImagesToFolderSequentially(
-            sourceImagePaths: sourceImagePaths,
-            targetFolderPath: attachmentFolderPath,
-          )
-        : await copyImagesToFolderSequentially(
-            sourceImagePaths: sourceImagePaths,
-            targetFolderPath: attachmentFolderPath,
-          );
-
-    final attachment = AttachmentModel(
-      parentDocumentNumber: parentDocumentNumber.trim(),
-      subDocumentNumber: subDocumentNumber.trim(),
-      subDocumentDate: subDocumentDate,
-      subDocumentTitle: subDocumentTitle,
-      notes: notes,
-      folderPath: attachmentFolderPath,
-      imagePaths: savedImagePaths,
+    final preparedPdf =
+        await createPdfFromImages(
+      sourceImagePaths:
+          sourceImagePaths,
+      relativeFolderPath:
+          relativeFolder,
+      pdfFileName: pdfName,
     );
 
-    _attachments.add(attachment);
-    return attachment;
-  }
+    final attachment =
+        AttachmentModel(
+      parentDocumentId:
+          parentDocumentId,
+      parentDocumentNumber:
+          parentDocumentNumber,
+      parentDocumentTitle:
+          parentDocumentTitle,
+      subDocumentNumber:
+          subDocumentNumber.trim(),
+      subDocumentDate:
+          subDocumentDate.trim(),
+      subDocumentTitle:
+          subDocumentTitle.trim(),
+      notes: notes.trim(),
+      reminderDate: reminderDate,
+      reminderNote: reminderNote,
+      hasPdf: true,
+      relativeFolderPath:
+          preparedPdf.relativeFolderPath,
+      pdfRelativePath:
+          preparedPdf.relativePdfPath,
+      pdfSizeBytes:
+          preparedPdf.fileSizeBytes,
+      pdfSha256:
+          preparedPdf.sha256Hash,
+      pageCount:
+          preparedPdf.pageCount,
+    );
 
-  static List<AttachmentModel> getAllAttachments() {
-    return List.unmodifiable(_attachments);
-  }
+    final response =
+        await ApiService.postJson(
+      'insert_attachment.php',
+      attachment.toCreateJson(),
+    );
 
-  static List<AttachmentModel> getAttachmentsForDocument(
-    String parentDocumentNumber,
-  ) {
-    return _attachments
-        .where(
-          (att) =>
-              att.parentDocumentNumber.trim() == parentDocumentNumber.trim(),
-        )
-        .toList();
-  }
+    final savedValue =
+        response['attachment'];
 
-  static AttachmentModel? getAttachmentByNumbers({
-    required String parentDocumentNumber,
-    required String subDocumentNumber,
-  }) {
-    try {
-      return _attachments.firstWhere(
-        (att) =>
-            att.parentDocumentNumber.trim() == parentDocumentNumber.trim() &&
-            att.subDocumentNumber.trim() == subDocumentNumber.trim(),
+    if (savedValue is! Map) {
+      throw const ApiException(
+        'لم يرجع الخادم بيانات الكتاب التابع.',
       );
-    } catch (_) {
-      return null;
     }
+
+    await deleteSuccessfulScanImages(
+      sourceImagePaths,
+    );
+
+    return AttachmentModel.fromJson(
+      Map<String, dynamic>.from(
+        savedValue,
+      ),
+    );
   }
 }
