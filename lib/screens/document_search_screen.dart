@@ -1,1100 +1,1562 @@
-import 'dart:async';
-import 'dart:convert';
-import 'dart:io';
 import 'dart:typed_data';
-import 'dart:ui' as ui;
 
 import 'package:flutter/material.dart';
-import 'package:http/http.dart' as http;
-import 'package:path/path.dart' as p;
-import 'package:pdf/pdf.dart';
-import 'package:pdf/widgets.dart' as pw;
 import 'package:printing/printing.dart';
 
+import '../models/attachment_model.dart';
 import '../models/document_model.dart';
+import '../services/api_service.dart';
 
-class DocumentSearchScreen extends StatefulWidget {
+class SearchGroup {
+  final DocumentModel parent;
+  final List<AttachmentModel> attachments;
+
+  const SearchGroup({
+    required this.parent,
+    required this.attachments,
+  });
+}
+
+class DocumentSearchScreen
+    extends StatefulWidget {
   const DocumentSearchScreen({super.key});
 
   @override
-  State<DocumentSearchScreen> createState() => _DocumentSearchScreenState();
+  State<DocumentSearchScreen> createState() =>
+      _DocumentSearchScreenState();
 }
 
-class _DocumentSearchScreenState extends State<DocumentSearchScreen> {
-  final TextEditingController _searchController = TextEditingController();
+class _DocumentSearchScreenState
+    extends State<DocumentSearchScreen> {
+  final searchController =
+      TextEditingController();
 
-  bool _isSearching = false;
-  bool _isPrinting = false;
+  List<SearchGroup> groups = [];
 
-  Timer? _searchDebounce;
-  int _activeSearchToken = 0;
-  List<_SearchGroup> _smartSearchGroups = [];
+  bool isLoading = false;
+  int currentPage = 1;
+  int totalPages = 0;
+  int totalItems = 0;
 
-  DocumentModel? _searchedDocument;
-  List<DocumentModel> _searchResults = [];
-  List<DocumentModel> _searchedAttachments = [];
-  List<String> _previewImages = [];
-  int _currentPreviewIndex = 0;
+  Uint8List? selectedPdfBytes;
+  String selectedPdfTitle = '';
+  int? selectedPdfId;
+  String? selectedPdfRecordType;
+  bool isPdfLoading = false;
 
-  final Map<String, String> _attachmentParentTitles = {};
-  final Map<String, String> _attachmentParentNumbers = {};
-
-  final Color bgColor = const Color(0xFFEAF6FF);
-  final Color cardColor = const Color(0xFFFFFFFF);
-  final Color accentColor = const Color(0xFF1976D2);
-  final Color accentLightColor = const Color(0xFF5CB6FF);
-  final Color accentDarkColor = const Color(0xFF0D47A1);
-  final Color darkColor = const Color(0xFF0D47A1);
-  final Color softTextColor = const Color(0xFF5F7FA6);
-  final Color borderColor = const Color(0xFFB8D9F7);
-
-  String get _apiBaseUrl {
-    if (Platform.isAndroid) {
-      return 'http://10.0.2.2/document_api';
-    }
-    return 'http://localhost/document_api';
+  @override
+  void dispose() {
+    searchController.dispose();
+    super.dispose();
   }
 
-  LinearGradient get _mainGradient => LinearGradient(
-        colors: [accentColor, accentLightColor],
-        begin: Alignment.centerRight,
-        end: Alignment.centerLeft,
-      );
-
-  LinearGradient get _softGradient => const LinearGradient(
-        colors: [Color(0xFFF8FCFF), Color(0xFFEAF6FF)],
-        begin: Alignment.topRight,
-        end: Alignment.bottomLeft,
-      );
-
-  bool _isImageFile(String path) {
-    final lower = path.toLowerCase();
-    return lower.endsWith('.jpg') ||
-        lower.endsWith('.jpeg') ||
-        lower.endsWith('.png') ||
-        lower.endsWith('.bmp') ||
-        lower.endsWith('.tif') ||
-        lower.endsWith('.tiff') ||
-        lower.endsWith('.webp');
-  }
-
-  List<String> _imagePathsFromJson(dynamic rawImagePaths) {
-    if (rawImagePaths is List) {
-      return rawImagePaths.map((e) => e.toString()).toList();
-    }
-
-    if (rawImagePaths is String && rawImagePaths.trim().isNotEmpty) {
-      try {
-        final decoded = jsonDecode(rawImagePaths);
-        if (decoded is List) {
-          return decoded.map((e) => e.toString()).toList();
-        }
-      } catch (_) {}
-    }
-
-    return [];
-  }
-
-  bool _isAttachmentMap(Map<String, dynamic> map) {
-    final type = (map['type'] ?? map['record_type'] ?? '').toString().trim();
-    final status = (map['status'] ?? '').toString().trim();
-
-    return type == 'attachment' ||
-        type == 'كتاب تابع' ||
-        status == 'كتاب تابع' ||
-        map.containsKey('sub_document_number') ||
-        map.containsKey('sub_document_title') ||
-        map.containsKey('parent_document_number');
-  }
-
-  String _documentKey(DocumentModel document) {
-    return '${document.id ?? ''}|${document.status}|${document.documentNumber}|${document.documentDate}|${document.documentTitle}|${document.folderPath}';
-  }
-
-  String _parentTitleFor(DocumentModel document) {
-    return _attachmentParentTitles[_documentKey(document)] ?? '';
-  }
-
-  String _parentNumberFor(DocumentModel document) {
-    return _attachmentParentNumbers[_documentKey(document)] ?? '';
-  }
-
-  void _rememberAttachmentParent(DocumentModel attachment, Map<String, dynamic> map) {
-    final key = _documentKey(attachment);
-    final parentTitle = (map['parent_document_title'] ?? '').toString().trim();
-    final parentNumber = (map['parent_document_number'] ?? '').toString().trim();
-
-    if (parentTitle.isNotEmpty) {
-      _attachmentParentTitles[key] = parentTitle;
-    }
-    if (parentNumber.isNotEmpty) {
-      _attachmentParentNumbers[key] = parentNumber;
-    }
-  }
-
-  DocumentModel _documentFromJson(Map<String, dynamic> map) {
-    final imagePaths = _imagePathsFromJson(map['image_paths']);
-
-    return DocumentModel(
-      id: map['id'] is int ? map['id'] : int.tryParse('${map['id']}'),
-      documentNumber: (map['document_number'] ?? '').toString(),
-      documentDate: (map['document_date'] ?? '').toString(),
-      documentTitle: (map['document_title'] ?? '').toString(),
-      category: map['category']?.toString(),
-      notes: (map['notes'] ?? '').toString(),
-      status: (map['status'] ?? 'قيد الإنجاز').toString(),
-      reminderDate: map['reminder_date']?.toString(),
-      reminderNote: map['reminder_note']?.toString(),
-      folderPath: (map['folder_path'] ?? '').toString(),
-      imagePaths: imagePaths,
-    );
-  }
-
-  DocumentModel _attachmentFromJson(Map<String, dynamic> map) {
-    final imagePaths = _imagePathsFromJson(map['image_paths']);
-
-    final attachment = DocumentModel(
-      id: map['id'] is int ? map['id'] : int.tryParse('${map['id']}'),
-      documentNumber: (map['sub_document_number'] ?? map['document_number'] ?? '').toString(),
-      documentDate: (map['sub_document_date'] ?? map['document_date'] ?? '').toString(),
-      documentTitle: (map['sub_document_title'] ?? map['document_title'] ?? '').toString(),
-      category: map['category']?.toString(),
-      notes: (map['notes'] ?? '').toString(),
-      status: 'كتاب تابع',
-      reminderDate: map['reminder_date']?.toString(),
-      reminderNote: map['reminder_note']?.toString(),
-      folderPath: (map['folder_path'] ?? '').toString(),
-      imagePaths: imagePaths,
-    );
-
-    _rememberAttachmentParent(attachment, map);
-    return attachment;
-  }
-
-  Future<List<DocumentModel>> _fetchAllDocumentsFromApi() async {
-    final uri = Uri.parse('$_apiBaseUrl/get_documents.php');
-    final response = await http.get(uri);
-
-    if (response.statusCode != 200) {
-      throw Exception('فشل الاتصال بالخادم أثناء جلب الملفات');
-    }
-
-    final data = jsonDecode(response.body);
-    if (data['success'] != true) {
-      throw Exception(data['message'] ?? 'فشل جلب الملفات');
-    }
-
-    final List docs = data['documents'] ?? [];
-    return docs.map((item) {
-      final map = Map<String, dynamic>.from(item);
-      return _isAttachmentMap(map) ? _attachmentFromJson(map) : _documentFromJson(map);
-    }).toList();
-  }
-
-  Future<Map<String, dynamic>?> _fetchDocumentWithAttachmentsFromApi(
-    String documentNumber,
-  ) async {
-    final uri = Uri.parse('$_apiBaseUrl/get_document_by_number.php').replace(
-      queryParameters: {'document_number': documentNumber},
-    );
-
-    final response = await http.get(uri);
-    if (response.statusCode != 200) {
-      throw Exception('فشل الاتصال بالخادم أثناء البحث');
-    }
-
-    final data = jsonDecode(response.body);
-    if (data['success'] == true && data['document'] != null) {
-      final type = (data['type'] ?? '').toString();
-      final documentMap = Map<String, dynamic>.from(data['document']);
-      final document = type == 'attachment' || _isAttachmentMap(documentMap)
-          ? _attachmentFromJson(documentMap)
-          : _documentFromJson(documentMap);
-
-      final List attachmentsJson = data['attachments'] ?? [];
-      final attachments = attachmentsJson
-          .map((item) => _attachmentFromJson(Map<String, dynamic>.from(item)))
-          .toList();
-
-      return {'document': document, 'attachments': attachments, 'type': type};
-    }
-
-    return null;
-  }
-
-
-  Future<List<_SearchGroup>> _searchDocumentsSmartInApi(String query) async {
-    final uri = Uri.parse('$_apiBaseUrl/search_documents.php').replace(
-      queryParameters: {'query': query},
-    );
-
-    final response = await http.get(uri);
-
-    if (response.statusCode != 200) {
-      throw Exception('search_documents.php غير متاح');
-    }
-
-    final data = jsonDecode(response.body);
-
-    if (data['success'] != true) {
-      throw Exception(data['message'] ?? 'فشل البحث الذكي');
-    }
-
-    final List rawGroups = data['groups'] ?? [];
-
-    if (rawGroups.isNotEmpty) {
-      return rawGroups.map((item) {
-        final groupMap = Map<String, dynamic>.from(item);
-        final parentMap = Map<String, dynamic>.from(
-          groupMap['parent'] ?? groupMap['document'] ?? {},
-        );
-
-        final parent = _documentFromJson(parentMap);
-
-        final List rawAttachments = groupMap['attachments'] ?? [];
-        final attachments = rawAttachments
-            .map((attachment) => _attachmentFromJson(
-                  Map<String, dynamic>.from(attachment),
-                ))
-            .toList();
-
-        attachments.sort((a, b) => b.documentDate.compareTo(a.documentDate));
-
-        return _SearchGroup(
-          parent: parent,
-          attachments: attachments,
-          matchText: (groupMap['match_text'] ?? '').toString(),
-        );
-      }).toList();
-    }
-
-    // دعم احتياطي إذا رجّع الـ API ملفاً واحداً مثل get_document_by_number.php
-    if (data['document'] != null) {
-      final parent = _documentFromJson(Map<String, dynamic>.from(data['document']));
-      final List rawAttachments = data['attachments'] ?? [];
-      final attachments = rawAttachments
-          .map((attachment) => _attachmentFromJson(
-                Map<String, dynamic>.from(attachment),
-              ))
-          .toList();
-
-      return [
-        _SearchGroup(
-          parent: parent,
-          attachments: attachments,
-          matchText: '',
-        )
-      ];
-    }
-
-    return [];
-  }
-
-  Future<List<DocumentModel>> _searchDocumentsInApi(String query) async {
-    final allDocuments = await _fetchAllDocumentsFromApi();
-    final lowerQuery = query.toLowerCase();
-
-    final results = allDocuments.where((doc) {
-      final category = (doc.category ?? '').toLowerCase();
-      final parentTitle = _parentTitleFor(doc).toLowerCase();
-      final parentNumber = _parentNumberFor(doc).toLowerCase();
-      return doc.documentNumber.toLowerCase().contains(lowerQuery) ||
-          doc.documentTitle.toLowerCase().contains(lowerQuery) ||
-          doc.notes.toLowerCase().contains(lowerQuery) ||
-          doc.status.toLowerCase().contains(lowerQuery) ||
-          category.contains(lowerQuery) ||
-          parentTitle.contains(lowerQuery) ||
-          parentNumber.contains(lowerQuery) ||
-          doc.folderPath.toLowerCase().contains(lowerQuery);
-    }).toList();
-
-    results.sort((a, b) => b.documentDate.compareTo(a.documentDate));
-    return results;
-  }
-
-  bool _sameDocumentIdentity(DocumentModel a, DocumentModel b) {
-    return a.documentNumber == b.documentNumber &&
-        a.documentDate == b.documentDate &&
-        a.documentTitle == b.documentTitle &&
-        a.folderPath == b.folderPath &&
-        a.status == b.status;
-  }
-
-  bool _isAttachmentForParent(DocumentModel attachment, DocumentModel parent) {
-    if (attachment.status.trim() != 'كتاب تابع') return false;
-
-    final savedParentNumber = _parentNumberFor(attachment);
-    final savedParentTitle = _parentTitleFor(attachment);
-
-    if (savedParentNumber.isNotEmpty || savedParentTitle.isNotEmpty) {
-      final numberOk = savedParentNumber.isEmpty || savedParentNumber == parent.documentNumber;
-      final titleOk = savedParentTitle.isEmpty || savedParentTitle == parent.documentTitle;
-      return numberOk && titleOk;
-    }
-
-    final parentRoot = _resolveDocumentRootFolderPath(parent.folderPath);
-    final attachmentRoot = _resolveDocumentRootFolderPath(attachment.folderPath);
-
-    if (parentRoot.isEmpty || attachmentRoot.isEmpty) return false;
-
-    return p.isWithin(parentRoot, attachmentRoot) ||
-        p.normalize(parentRoot).toLowerCase() == p.normalize(attachmentRoot).toLowerCase();
-  }
-
-  Future<List<DocumentModel>> _fetchAttachmentsForDocument(DocumentModel document) async {
-    if (document.status.trim() == 'كتاب تابع') return [];
-
-    try {
-      final allDocuments = await _fetchAllDocumentsFromApi();
-      final attachments = allDocuments.where((item) => _isAttachmentForParent(item, document)).toList();
-      attachments.sort((a, b) => b.documentDate.compareTo(a.documentDate));
-      return attachments;
-    } catch (_) {
-      return [];
-    }
-  }
-
-  String _resolveDocumentRootFolderPath(String folderPath) {
-    if (folderPath.trim().isEmpty) return '';
-    final normalized = p.normalize(folderPath);
-    final folderName = p.basename(normalized).toLowerCase();
-    if (folderName == 'original') return p.dirname(normalized);
-    return normalized;
-  }
-
-  int _extractLeadingNumber(String filePath) {
-    final fileName = p.basenameWithoutExtension(filePath).trim();
-    final match = RegExp(r'^\d+').firstMatch(fileName);
-    if (match == null) return -1;
-    return int.tryParse(match.group(0) ?? '') ?? -1;
-  }
-
-  Future<List<String>> _loadAllImagesFromDocumentFolder(String folderPath) async {
-    try {
-      final rootFolderPath = _resolveDocumentRootFolderPath(folderPath);
-      if (rootFolderPath.isEmpty) return [];
-
-      final rootDir = Directory(rootFolderPath);
-      if (!await rootDir.exists()) return [];
-
-      final List<String> imagePaths = [];
-      await for (final entity in rootDir.list(recursive: true, followLinks: false)) {
-        if (entity is File && _isImageFile(entity.path)) imagePaths.add(entity.path);
-      }
-
-      imagePaths.sort((a, b) {
-        final aIsOriginal = a.toLowerCase().contains('${Platform.pathSeparator}original${Platform.pathSeparator}');
-        final bIsOriginal = b.toLowerCase().contains('${Platform.pathSeparator}original${Platform.pathSeparator}');
-        if (aIsOriginal && !bIsOriginal) return -1;
-        if (!aIsOriginal && bIsOriginal) return 1;
-        final aNum = _extractLeadingNumber(a);
-        final bNum = _extractLeadingNumber(b);
-        if (aNum != -1 && bNum != -1 && aNum != bNum) return aNum.compareTo(bNum);
-        return a.toLowerCase().compareTo(b.toLowerCase());
-      });
-
-      return imagePaths;
-    } catch (_) {
-      return [];
-    }
-  }
-
-  Future<void> _loadPreviewFor(DocumentModel document) async {
-    List<String> folderImages = [];
-    if (document.folderPath.trim().isNotEmpty) {
-      folderImages = await _loadAllImagesFromDocumentFolder(document.folderPath);
-    }
-    if (folderImages.isEmpty) {
-      folderImages = document.imagePaths.where((path) => File(path).existsSync()).toList();
-    }
+  void showMessage(
+    String message, {
+    bool isError = false,
+  }) {
     if (!mounted) return;
-    setState(() {
-      _previewImages = folderImages;
-      _currentPreviewIndex = 0;
-    });
+
+    ScaffoldMessenger.of(context)
+      ..hideCurrentSnackBar()
+      ..showSnackBar(
+        SnackBar(
+          content: Text(message),
+          backgroundColor: isError
+              ? const Color(0xFFB42318)
+              : const Color(0xFF16835D),
+        ),
+      );
   }
 
-  Future<void> _searchDocument({bool silent = false}) async {
-    final query = _searchController.text.trim();
+  Future<void> search({
+    int page = 1,
+  }) async {
+    final query =
+        searchController.text.trim();
 
-    if (query.isEmpty) {
-      if (!silent) {
-        _showMessage('يرجى إدخال رقم الملف أو كلمة للبحث', isError: true);
-      }
-      setState(() {
-        _searchedDocument = null;
-        _searchResults = [];
-        _searchedAttachments = [];
-        _smartSearchGroups = [];
-        _previewImages = [];
-        _currentPreviewIndex = 0;
-      });
+    if (query.length < 2) {
+      showMessage(
+        'اكتبي حرفين على الأقل للبحث.',
+        isError: true,
+      );
       return;
     }
 
-    final int searchToken = ++_activeSearchToken;
+    if (isLoading) return;
 
-    setState(() => _isSearching = true);
+    FocusScope.of(context).unfocus();
+
+    setState(() {
+      isLoading = true;
+    });
 
     try {
-      // أولاً نحاول البحث الذكي الجديد من search_documents.php.
-      // إذا الملف غير موجود أو صار خلل، نرجع تلقائياً للبحث القديم حتى لا يتوقف النظام.
-      List<_SearchGroup> groups = [];
+      final response =
+          await ApiService.getJson(
+        'search_documents.php',
+        queryParameters: {
+          'query': query,
+          'page': page,
+          'per_page': 20,
+        },
+      );
 
-      try {
-        groups = await _searchDocumentsSmartInApi(query);
-      } catch (_) {
-        groups = [];
-      }
+      final rawGroups = response['groups'];
 
-      if (searchToken != _activeSearchToken || !mounted) return;
+      final parsedGroups = <SearchGroup>[];
 
-      if (groups.isNotEmpty) {
-        final firstGroup = groups.first;
+      if (rawGroups is List) {
+        for (final rawGroup in rawGroups) {
+          if (rawGroup is! Map) continue;
 
-        setState(() {
-          _smartSearchGroups = groups;
-          _searchedDocument = firstGroup.parent;
-          _searchedAttachments = firstGroup.attachments;
-          _searchResults = groups.map((group) => group.parent).toList();
-        });
+          final group =
+              Map<String, dynamic>.from(
+            rawGroup,
+          );
 
-        await _loadPreviewFor(firstGroup.parent);
+          final rawParent = group['parent'];
 
-        if (!silent) {
-          _showMessage(
-            firstGroup.attachments.isEmpty
-                ? 'تم العثور على الملف'
-                : 'تم العثور على الملف ومعه ${firstGroup.attachments.length} كتاب تابع',
+          if (rawParent is! Map) continue;
+
+          final parent =
+              DocumentModel.fromJson(
+            Map<String, dynamic>.from(
+              rawParent,
+            ),
+          );
+
+          final attachments =
+              <AttachmentModel>[];
+
+          final rawAttachments =
+              group['attachments'];
+
+          if (rawAttachments is List) {
+            for (final rawAttachment
+                in rawAttachments) {
+              if (rawAttachment is! Map) {
+                continue;
+              }
+
+              final attachment =
+                  AttachmentModel.fromJson(
+                Map<String, dynamic>.from(
+                  rawAttachment,
+                ),
+              ).copyWith(
+                parentDocumentId:
+                    parent.id ?? 0,
+                parentDocumentNumber:
+                    parent.documentNumber,
+                parentDocumentTitle:
+                    parent.documentTitle,
+              );
+
+              attachments.add(attachment);
+            }
+          }
+
+          parsedGroups.add(
+            SearchGroup(
+              parent: parent,
+              attachments: attachments,
+            ),
           );
         }
+      }
+
+      final paginationValue =
+          response['pagination'];
+
+      final pagination =
+          paginationValue is Map
+              ? Map<String, dynamic>.from(
+                  paginationValue,
+                )
+              : <String, dynamic>{};
+
+      if (!mounted) return;
+
+      setState(() {
+        groups = parsedGroups;
+        selectedPdfBytes = null;
+        selectedPdfTitle = '';
+        selectedPdfId = null;
+        selectedPdfRecordType = null;
+        currentPage =
+            _parseInt(pagination['page']) ??
+                page;
+        totalPages = _parseInt(
+              pagination['total_pages'],
+            ) ??
+            0;
+        totalItems = _parseInt(
+              pagination['total_items'],
+            ) ??
+            parsedGroups.length;
+      });
+    } on ApiException catch (exception) {
+      showMessage(
+        exception.message,
+        isError: true,
+      );
+    } catch (exception) {
+      showMessage(
+        'تعذر تنفيذ البحث: $exception',
+        isError: true,
+      );
+    } finally {
+      if (mounted) {
+        setState(() {
+          isLoading = false;
+        });
+      }
+    }
+  }
+
+  int? _parseInt(dynamic value) {
+    if (value is int) return value;
+
+    return int.tryParse(
+      value?.toString() ?? '',
+    );
+  }
+
+  Future<void> previewPdf({
+    required int? id,
+    required String recordType,
+    required String title,
+  }) async {
+    if (id == null || id < 1) {
+      showMessage(
+        'معرّف الملف غير صحيح.',
+        isError: true,
+      );
+      return;
+    }
+
+    if (isPdfLoading) return;
+
+    setState(() {
+      isPdfLoading = true;
+      selectedPdfBytes = null;
+      selectedPdfTitle = title;
+      selectedPdfId = id;
+      selectedPdfRecordType = recordType;
+    });
+
+    try {
+      final bytes =
+          await ApiService.getPdfBytes(
+        id: id,
+        recordType: recordType,
+      );
+
+      if (!mounted) return;
+
+      setState(() {
+        selectedPdfBytes = bytes;
+      });
+    } on ApiException catch (exception) {
+      showMessage(
+        exception.message,
+        isError: true,
+      );
+    } catch (exception) {
+      showMessage(
+        'تعذر فتح ملف PDF: $exception',
+        isError: true,
+      );
+    } finally {
+      if (mounted) {
+        setState(() {
+          isPdfLoading = false;
+        });
+      }
+    }
+  }
+
+  Future<void> printSelectedPdf() async {
+    final bytes = selectedPdfBytes;
+
+    if (bytes == null || bytes.isEmpty) {
+      showMessage(
+        'اختاري كتابًا لعرضه أولًا.',
+        isError: true,
+      );
+      return;
+    }
+
+    try {
+      final selectedPrinter =
+          await Printing.pickPrinter(
+        context: context,
+        title: 'اختيار الطابعة',
+      );
+
+      if (selectedPrinter == null) {
         return;
       }
 
-      // البحث القديم يبقى داعماً للبيانات السابقة ولحالة عدم وجود API البحث الجديد.
-      final exactData = await _fetchDocumentWithAttachmentsFromApi(query);
-      final exactDocument = exactData?['document'] as DocumentModel?;
-      final exactAttachments =
-          (exactData?['attachments'] as List<DocumentModel>?) ?? [];
-      final results = await _searchDocumentsInApi(query);
-      final selectedDocument =
-          exactDocument ?? (results.isNotEmpty ? results.first : null);
+      final printed =
+          await Printing.directPrintPdf(
+        printer: selectedPrinter,
+        name: selectedPdfTitle.isEmpty
+            ? 'archive_document.pdf'
+            : '$selectedPdfTitle.pdf',
+        onLayout: (_) async => bytes,
+      );
 
-      if (searchToken != _activeSearchToken || !mounted) return;
-
-      setState(() {
-        _smartSearchGroups = [];
-        _searchedDocument = selectedDocument;
-        _searchResults = results;
-        _searchedAttachments = exactDocument != null ? exactAttachments : [];
-      });
-
-      if (selectedDocument == null) {
-        setState(() => _previewImages = []);
-        if (!silent) {
-          _showMessage('لم يتم العثور على نتيجة', isError: true);
-        }
-      } else {
-        await _loadPreviewFor(selectedDocument);
-        if (!silent) {
-          _showMessage(_searchedAttachments.isEmpty
-              ? 'تم العثور على الملف'
-              : 'تم العثور على الملف ومعه ${_searchedAttachments.length} كتاب تابع');
-        }
-      }
-    } catch (e) {
-      if (!silent) {
-        _showMessage('حدث خطأ أثناء البحث: $e', isError: true);
-      }
-    } finally {
-      if (mounted && searchToken == _activeSearchToken) {
-        setState(() => _isSearching = false);
-      }
-    }
-  }
-
-  void _onSearchTextChanged(String value) {
-    _searchDebounce?.cancel();
-
-    final query = value.trim();
-    if (query.isEmpty) {
-      _activeSearchToken++;
-      setState(() {
-        _searchedDocument = null;
-        _searchResults = [];
-        _searchedAttachments = [];
-        _smartSearchGroups = [];
-        _previewImages = [];
-        _currentPreviewIndex = 0;
-        _isSearching = false;
-      });
-      return;
-    }
-
-    _searchDebounce = Timer(const Duration(milliseconds: 450), () {
-      if (mounted) {
-        _searchDocument(silent: true);
-      }
-    });
-  }
-
-  void _clearSearch() {
-    _searchDebounce?.cancel();
-    _activeSearchToken++;
-    setState(() {
-      _searchController.clear();
-      _searchedDocument = null;
-      _searchResults = [];
-      _searchedAttachments = [];
-      _smartSearchGroups = [];
-      _previewImages = [];
-      _currentPreviewIndex = 0;
-      _isSearching = false;
-    });
-    _showMessage('تم مسح نتيجة البحث');
-  }
-
-  Future<void> _selectDocument(DocumentModel document) async {
-    final matchingSmartGroup = _smartSearchGroups.where((group) {
-      return _sameDocumentIdentity(group.parent, document);
-    }).toList();
-
-    if (matchingSmartGroup.isNotEmpty) {
-      final group = matchingSmartGroup.first;
-      setState(() {
-        _searchedDocument = group.parent;
-        _searchedAttachments = group.attachments;
-      });
-      await _loadPreviewFor(group.parent);
-      return;
-    }
-
-    setState(() {
-      _searchedDocument = document;
-      _searchedAttachments = [];
-    });
-
-    if (document.status.trim() == 'كتاب تابع') {
-      setState(() {
-        _searchedAttachments = [];
-      });
-    } else {
-      final attachments = await _fetchAttachmentsForDocument(document);
-      setState(() {
-        _searchedAttachments = attachments;
-      });
-    }
-
-    await _loadPreviewFor(document);
-  }
-
-  Future<void> _printCurrentDocument() async {
-    final activeDocument = _searchedDocument;
-    if (activeDocument == null) {
-      _showMessage('لا يوجد ملف محدد للطباعة', isError: true);
-      return;
-    }
-
-    final validImagePaths = _previewImages.where((path) => File(path).existsSync()).toList();
-    if (validImagePaths.isEmpty) {
-      _showMessage('لا توجد صور صالحة للطباعة لهذا الملف', isError: true);
-      return;
-    }
-
-    setState(() => _isPrinting = true);
-    try {
-      final pdf = pw.Document();
-      for (final imagePath in validImagePaths) {
-        final Uint8List imageBytes = await File(imagePath).readAsBytes();
-        final imageProvider = pw.MemoryImage(imageBytes);
-        pdf.addPage(
-          pw.Page(
-            pageFormat: PdfPageFormat.a4,
-            margin: const pw.EdgeInsets.all(18),
-            build: (_) => pw.Center(child: pw.Image(imageProvider, fit: pw.BoxFit.contain)),
-          ),
+      if (!printed) {
+        showMessage(
+          'لم تكتمل عملية الطباعة.',
+          isError: true,
         );
       }
-      await Printing.layoutPdf(
-        name: 'document_${activeDocument.documentNumber}',
-        onLayout: (_) async => pdf.save(),
+    } catch (exception) {
+      showMessage(
+        'تعذر تنفيذ الطباعة: $exception',
+        isError: true,
       );
-    } catch (e) {
-      _showMessage('حدث خطأ أثناء الطباعة: $e', isError: true);
-    } finally {
-      if (mounted) setState(() => _isPrinting = false);
     }
   }
 
-  void _showMessage(String message, {bool isError = false}) {
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Text(message, textAlign: TextAlign.right),
-        backgroundColor: isError ? Colors.red.shade700 : Colors.green.shade700,
-        behavior: SnackBarBehavior.floating,
-      ),
+  Future<String?> pickDate(
+    String? currentValue,
+  ) async {
+    final current =
+        DateTime.tryParse(
+          currentValue ?? '',
+        ) ??
+        DateTime.now();
+
+    final selected = await showDatePicker(
+      context: context,
+      initialDate: current,
+      firstDate: DateTime(2000),
+      lastDate: DateTime(2100),
+      locale: const Locale('ar'),
     );
+
+    if (selected == null) return null;
+
+    return '${selected.year.toString().padLeft(4, '0')}-'
+        '${selected.month.toString().padLeft(2, '0')}-'
+        '${selected.day.toString().padLeft(2, '0')}';
   }
 
-  BoxDecoration _cardDecoration({bool gradient = true}) {
-    return BoxDecoration(
-      color: gradient ? null : cardColor,
-      gradient: gradient ? _softGradient : null,
-      borderRadius: BorderRadius.circular(22),
-      border: Border.all(color: borderColor),
-      boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.035), blurRadius: 10, offset: const Offset(0, 3))],
+  Future<void> editMainDocument(
+    DocumentModel document,
+  ) async {
+    final numberController =
+        TextEditingController(
+      text: document.documentNumber,
     );
+
+    final dateController =
+        TextEditingController(
+      text: document.documentDate,
+    );
+
+    final titleController =
+        TextEditingController(
+      text: document.documentTitle,
+    );
+
+    final notesController =
+        TextEditingController(
+      text: document.notes,
+    );
+
+    final reminderDateController =
+        TextEditingController(
+      text: document.reminderDate ?? '',
+    );
+
+    final reminderNoteController =
+        TextEditingController(
+      text: document.reminderNote ?? '',
+    );
+
+    var status = document.status;
+    var saving = false;
+
+    final saved =
+        await showDialog<bool>(
+      context: context,
+      barrierDismissible: false,
+      builder: (dialogContext) {
+        return StatefulBuilder(
+          builder: (
+            dialogContext,
+            setDialogState,
+          ) {
+            Future<void> submit() async {
+              if (saving) return;
+
+              if (numberController.text
+                      .trim()
+                      .isEmpty ||
+                  dateController.text
+                      .trim()
+                      .isEmpty ||
+                  titleController.text
+                      .trim()
+                      .isEmpty) {
+                showMessage(
+                  'الرقم والتاريخ والاسم مطلوبة.',
+                  isError: true,
+                );
+                return;
+              }
+
+              final reminderDate =
+                  reminderDateController.text
+                      .trim();
+
+              final reminderNote =
+                  reminderNoteController.text
+                      .trim();
+
+              if (
+                  (reminderDate.isEmpty &&
+                      reminderNote.isNotEmpty) ||
+                  (reminderDate.isNotEmpty &&
+                      reminderNote.isEmpty)) {
+                showMessage(
+                  'أدخلي تاريخ وملاحظة '
+                  'التنبيه معًا.',
+                  isError: true,
+                );
+                return;
+              }
+
+              setDialogState(() {
+                saving = true;
+              });
+
+              try {
+                final updated =
+                    document.copyWith(
+                  documentNumber:
+                      numberController.text
+                          .trim(),
+                  documentDate:
+                      dateController.text
+                          .trim(),
+                  documentTitle:
+                      titleController.text
+                          .trim(),
+                  notes: notesController.text
+                      .trim(),
+                  status: status,
+                  reminderDate:
+                      reminderDate.isEmpty
+                          ? null
+                          : reminderDate,
+                  reminderNote:
+                      reminderNote.isEmpty
+                          ? null
+                          : reminderNote,
+                  clearReminderDate:
+                      reminderDate.isEmpty,
+                  clearReminderNote:
+                      reminderNote.isEmpty,
+                );
+
+                await ApiService.postJson(
+                  'update_document.php',
+                  updated.toUpdateJson(),
+                );
+
+                if (!dialogContext.mounted) {
+                  return;
+                }
+
+                Navigator.of(dialogContext)
+                    .pop(true);
+              } on ApiException catch (
+                  exception) {
+                showMessage(
+                  exception.message,
+                  isError: true,
+                );
+
+                setDialogState(() {
+                  saving = false;
+                });
+              } catch (exception) {
+                showMessage(
+                  'تعذر التحديث: $exception',
+                  isError: true,
+                );
+
+                setDialogState(() {
+                  saving = false;
+                });
+              }
+            }
+
+            return AlertDialog(
+              title: const Text(
+                'تعديل الملف الرئيسي',
+              ),
+              content: SizedBox(
+                width: 520,
+                child: SingleChildScrollView(
+                  child: Column(
+                    mainAxisSize:
+                        MainAxisSize.min,
+                    children: [
+                      TextField(
+                        controller:
+                            numberController,
+                        decoration:
+                            const InputDecoration(
+                          labelText:
+                              'رقم الملف',
+                        ),
+                      ),
+                      const SizedBox(height: 12),
+                      TextField(
+                        controller:
+                            dateController,
+                        readOnly: true,
+                        onTap: () async {
+                          final date =
+                              await pickDate(
+                            dateController.text,
+                          );
+
+                          if (date != null) {
+                            setDialogState(() {
+                              dateController.text =
+                                  date;
+                            });
+                          }
+                        },
+                        decoration:
+                            const InputDecoration(
+                          labelText:
+                              'تاريخ الملف',
+                          suffixIcon: Icon(
+                            Icons.calendar_month,
+                          ),
+                        ),
+                      ),
+                      const SizedBox(height: 12),
+                      TextField(
+                        controller:
+                            titleController,
+                        decoration:
+                            const InputDecoration(
+                          labelText:
+                              'اسم الملف',
+                        ),
+                      ),
+                      const SizedBox(height: 12),
+                      DropdownButtonFormField<
+                          String>(
+                        initialValue: status,
+                        decoration:
+                            const InputDecoration(
+                          labelText:
+                              'حالة الملف',
+                        ),
+                        items: const [
+                          DropdownMenuItem(
+                            value:
+                                'قيد الإنجاز',
+                            child: Text(
+                              'قيد الإنجاز',
+                            ),
+                          ),
+                          DropdownMenuItem(
+                            value: 'منجز',
+                            child:
+                                Text('منجز'),
+                          ),
+                          DropdownMenuItem(
+                            value:
+                                'تم الاطلاع',
+                            child: Text(
+                              'تم الاطلاع',
+                            ),
+                          ),
+                        ],
+                        onChanged: (value) {
+                          if (value != null) {
+                            setDialogState(() {
+                              status = value;
+                            });
+                          }
+                        },
+                      ),
+                      const SizedBox(height: 12),
+                      TextField(
+                        controller:
+                            notesController,
+                        maxLines: 3,
+                        decoration:
+                            const InputDecoration(
+                          labelText:
+                              'الملاحظات',
+                        ),
+                      ),
+                      const SizedBox(height: 12),
+                      TextField(
+                        controller:
+                            reminderDateController,
+                        readOnly: true,
+                        onTap: () async {
+                          final date =
+                              await pickDate(
+                            reminderDateController
+                                .text,
+                          );
+
+                          if (date != null) {
+                            setDialogState(() {
+                              reminderDateController
+                                  .text = date;
+                            });
+                          }
+                        },
+                        decoration:
+                            InputDecoration(
+                          labelText:
+                              'تاريخ التنبيه',
+                          suffixIcon:
+                              IconButton(
+                            onPressed: () {
+                              setDialogState(() {
+                                reminderDateController
+                                    .clear();
+                                reminderNoteController
+                                    .clear();
+                              });
+                            },
+                            icon: const Icon(
+                              Icons.clear,
+                            ),
+                          ),
+                        ),
+                      ),
+                      const SizedBox(height: 12),
+                      TextField(
+                        controller:
+                            reminderNoteController,
+                        maxLines: 2,
+                        decoration:
+                            const InputDecoration(
+                          labelText:
+                              'ملاحظة التنبيه',
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+              actions: [
+                TextButton(
+                  onPressed: saving
+                      ? null
+                      : () {
+                          Navigator.of(
+                            dialogContext,
+                          ).pop(false);
+                        },
+                  child: const Text('إلغاء'),
+                ),
+                FilledButton(
+                  onPressed:
+                      saving ? null : submit,
+                  child: saving
+                      ? const SizedBox(
+                          width: 18,
+                          height: 18,
+                          child:
+                              CircularProgressIndicator(
+                            strokeWidth: 2,
+                            color: Colors.white,
+                          ),
+                        )
+                      : const Text('حفظ'),
+                ),
+              ],
+            );
+          },
+        );
+      },
+    );
+
+    numberController.dispose();
+    dateController.dispose();
+    titleController.dispose();
+    notesController.dispose();
+    reminderDateController.dispose();
+    reminderNoteController.dispose();
+
+    if (saved == true) {
+      showMessage(
+        'تم تحديث الملف بنجاح.',
+      );
+
+      await search(page: currentPage);
+    }
   }
 
-  Widget _buildSectionTitle(String title, {IconData? icon}) {
-    return Row(
-      children: [
-        if (icon != null) ...[Icon(icon, color: accentColor, size: 22), const SizedBox(width: 8)],
-        Text(title, style: TextStyle(fontSize: 19, fontWeight: FontWeight.w800, color: darkColor)),
-      ],
+  Future<void> editAttachment(
+    AttachmentModel attachment,
+  ) async {
+    final numberController =
+        TextEditingController(
+      text: attachment.subDocumentNumber,
     );
+
+    final dateController =
+        TextEditingController(
+      text: attachment.subDocumentDate,
+    );
+
+    final titleController =
+        TextEditingController(
+      text: attachment.subDocumentTitle,
+    );
+
+    final notesController =
+        TextEditingController(
+      text: attachment.notes,
+    );
+
+    final reminderDateController =
+        TextEditingController(
+      text: attachment.reminderDate ?? '',
+    );
+
+    final reminderNoteController =
+        TextEditingController(
+      text: attachment.reminderNote ?? '',
+    );
+
+    var saving = false;
+
+    final saved =
+        await showDialog<bool>(
+      context: context,
+      barrierDismissible: false,
+      builder: (dialogContext) {
+        return StatefulBuilder(
+          builder: (
+            dialogContext,
+            setDialogState,
+          ) {
+            Future<void> submit() async {
+              if (saving) return;
+
+              if (numberController.text
+                      .trim()
+                      .isEmpty ||
+                  dateController.text
+                      .trim()
+                      .isEmpty ||
+                  titleController.text
+                      .trim()
+                      .isEmpty) {
+                showMessage(
+                  'الرقم والتاريخ والاسم مطلوبة.',
+                  isError: true,
+                );
+                return;
+              }
+
+              final reminderDate =
+                  reminderDateController.text
+                      .trim();
+
+              final reminderNote =
+                  reminderNoteController.text
+                      .trim();
+
+              if (
+                  (reminderDate.isEmpty &&
+                      reminderNote.isNotEmpty) ||
+                  (reminderDate.isNotEmpty &&
+                      reminderNote.isEmpty)) {
+                showMessage(
+                  'أدخلي تاريخ وملاحظة '
+                  'التنبيه معًا.',
+                  isError: true,
+                );
+                return;
+              }
+
+              setDialogState(() {
+                saving = true;
+              });
+
+              try {
+                final updated =
+                    attachment.copyWith(
+                  subDocumentNumber:
+                      numberController.text
+                          .trim(),
+                  subDocumentDate:
+                      dateController.text
+                          .trim(),
+                  subDocumentTitle:
+                      titleController.text
+                          .trim(),
+                  notes: notesController.text
+                      .trim(),
+                  reminderDate:
+                      reminderDate.isEmpty
+                          ? null
+                          : reminderDate,
+                  reminderNote:
+                      reminderNote.isEmpty
+                          ? null
+                          : reminderNote,
+                  clearReminderDate:
+                      reminderDate.isEmpty,
+                  clearReminderNote:
+                      reminderNote.isEmpty,
+                );
+
+                await ApiService.postJson(
+                  'update_attachment.php',
+                  updated.toUpdateJson(),
+                );
+
+                if (!dialogContext.mounted) {
+                  return;
+                }
+
+                Navigator.of(dialogContext)
+                    .pop(true);
+              } on ApiException catch (
+                  exception) {
+                showMessage(
+                  exception.message,
+                  isError: true,
+                );
+
+                setDialogState(() {
+                  saving = false;
+                });
+              } catch (exception) {
+                showMessage(
+                  'تعذر التحديث: $exception',
+                  isError: true,
+                );
+
+                setDialogState(() {
+                  saving = false;
+                });
+              }
+            }
+
+            return AlertDialog(
+              title: const Text(
+                'تعديل الكتاب التابع',
+              ),
+              content: SizedBox(
+                width: 520,
+                child: SingleChildScrollView(
+                  child: Column(
+                    mainAxisSize:
+                        MainAxisSize.min,
+                    children: [
+                      TextField(
+                        controller:
+                            numberController,
+                        decoration:
+                            const InputDecoration(
+                          labelText:
+                              'رقم الكتاب التابع',
+                        ),
+                      ),
+                      const SizedBox(height: 12),
+                      TextField(
+                        controller:
+                            dateController,
+                        readOnly: true,
+                        onTap: () async {
+                          final date =
+                              await pickDate(
+                            dateController.text,
+                          );
+
+                          if (date != null) {
+                            setDialogState(() {
+                              dateController.text =
+                                  date;
+                            });
+                          }
+                        },
+                        decoration:
+                            const InputDecoration(
+                          labelText:
+                              'تاريخ الكتاب',
+                          suffixIcon: Icon(
+                            Icons.calendar_month,
+                          ),
+                        ),
+                      ),
+                      const SizedBox(height: 12),
+                      TextField(
+                        controller:
+                            titleController,
+                        decoration:
+                            const InputDecoration(
+                          labelText:
+                              'اسم الكتاب التابع',
+                        ),
+                      ),
+                      const SizedBox(height: 12),
+                      TextField(
+                        controller:
+                            notesController,
+                        maxLines: 3,
+                        decoration:
+                            const InputDecoration(
+                          labelText:
+                              'الملاحظات',
+                        ),
+                      ),
+                      const SizedBox(height: 12),
+                      TextField(
+                        controller:
+                            reminderDateController,
+                        readOnly: true,
+                        onTap: () async {
+                          final date =
+                              await pickDate(
+                            reminderDateController
+                                .text,
+                          );
+
+                          if (date != null) {
+                            setDialogState(() {
+                              reminderDateController
+                                  .text = date;
+                            });
+                          }
+                        },
+                        decoration:
+                            InputDecoration(
+                          labelText:
+                              'تاريخ التنبيه',
+                          suffixIcon:
+                              IconButton(
+                            onPressed: () {
+                              setDialogState(() {
+                                reminderDateController
+                                    .clear();
+                                reminderNoteController
+                                    .clear();
+                              });
+                            },
+                            icon: const Icon(
+                              Icons.clear,
+                            ),
+                          ),
+                        ),
+                      ),
+                      const SizedBox(height: 12),
+                      TextField(
+                        controller:
+                            reminderNoteController,
+                        maxLines: 2,
+                        decoration:
+                            const InputDecoration(
+                          labelText:
+                              'ملاحظة التنبيه',
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+              actions: [
+                TextButton(
+                  onPressed: saving
+                      ? null
+                      : () {
+                          Navigator.of(
+                            dialogContext,
+                          ).pop(false);
+                        },
+                  child: const Text('إلغاء'),
+                ),
+                FilledButton(
+                  onPressed:
+                      saving ? null : submit,
+                  child: saving
+                      ? const SizedBox(
+                          width: 18,
+                          height: 18,
+                          child:
+                              CircularProgressIndicator(
+                            strokeWidth: 2,
+                            color: Colors.white,
+                          ),
+                        )
+                      : const Text('حفظ'),
+                ),
+              ],
+            );
+          },
+        );
+      },
+    );
+
+    numberController.dispose();
+    dateController.dispose();
+    titleController.dispose();
+    notesController.dispose();
+    reminderDateController.dispose();
+    reminderNoteController.dispose();
+
+    if (saved == true) {
+      showMessage(
+        'تم تحديث الكتاب التابع.',
+      );
+
+      await search(page: currentPage);
+    }
   }
 
-  Widget _buildTextField({
-    required String label,
-    required IconData icon,
-    required TextEditingController controller,
-    String? hint,
-    ValueChanged<String>? onChanged,
+  Widget pdfButton({
+    required int? id,
+    required String recordType,
+    required bool hasPdf,
+    required String title,
   }) {
-    return Container(
-      decoration: BoxDecoration(
-        color: Colors.white.withOpacity(0.88),
-        borderRadius: BorderRadius.circular(16),
-        border: Border.all(color: borderColor),
-      ),
-      child: TextField(
-        controller: controller,
-        textAlign: TextAlign.right,
-        onChanged: onChanged,
-        onSubmitted: (_) => _searchDocument(),
-        style: TextStyle(fontSize: 15, color: darkColor, fontWeight: FontWeight.w600),
-        decoration: InputDecoration(
-          hintText: hint,
-          labelText: label,
-          prefixIcon: Icon(icon, color: accentColor, size: 20),
-          border: OutlineInputBorder(borderRadius: BorderRadius.circular(16), borderSide: BorderSide.none),
-          enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(16), borderSide: BorderSide(color: borderColor)),
-          focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(16), borderSide: BorderSide(color: accentColor, width: 1.4)),
-          filled: true,
-          fillColor: Colors.transparent,
-        ),
+    return IconButton(
+      tooltip: 'عرض PDF',
+      onPressed: hasPdf
+          ? () => previewPdf(
+                id: id,
+                recordType: recordType,
+                title: title,
+              )
+          : null,
+      icon: Icon(
+        Icons.visibility_outlined,
+        color: hasPdf
+            ? const Color(0xFF24528A)
+            : Colors.grey,
       ),
     );
   }
 
-  Widget _buildActionButton({
-    required VoidCallback? onPressed,
-    required String label,
-    required IconData icon,
-    bool dark = false,
-    bool loading = false,
-    double height = 48,
-  }) {
-    final gradient = dark
-        ? LinearGradient(colors: [accentDarkColor, accentColor], begin: Alignment.centerRight, end: Alignment.centerLeft)
-        : _mainGradient;
-    return SizedBox(
-      width: double.infinity,
-      height: height,
-      child: DecoratedBox(
-        decoration: BoxDecoration(gradient: gradient, borderRadius: BorderRadius.circular(16)),
-        child: ElevatedButton.icon(
-          onPressed: onPressed,
-          style: ElevatedButton.styleFrom(backgroundColor: Colors.transparent, shadowColor: Colors.transparent, foregroundColor: Colors.white, elevation: 0),
-          icon: loading
-              ? const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(color: Colors.white, strokeWidth: 2))
-              : Icon(icon, size: 18),
-          label: Text(label, style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w700)),
-        ),
+  Widget attachmentTile(
+    AttachmentModel attachment,
+  ) {
+    return Card(
+      color: const Color(0xFFF7FAFE),
+      margin: const EdgeInsets.symmetric(
+        horizontal: 14,
+        vertical: 5,
       ),
-    );
-  }
-
-  Widget _buildOutlinedActionButton({required VoidCallback? onPressed, required String label, required IconData icon}) {
-    return SizedBox(
-      width: double.infinity,
-      height: 48,
-      child: OutlinedButton.icon(
-        onPressed: onPressed,
-        style: OutlinedButton.styleFrom(
-          foregroundColor: darkColor,
-          backgroundColor: Colors.white.withOpacity(0.9),
-          side: BorderSide(color: borderColor),
-          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+      child: ListTile(
+        onTap: attachment.hasPdf
+            ? () => previewPdf(
+                  id: attachment.id,
+                  recordType: 'attachment',
+                  title:
+                      attachment.subDocumentTitle,
+                )
+            : null,
+        leading: const CircleAvatar(
+          backgroundColor:
+              Color(0xFFE0ECFA),
+          child: Icon(
+            Icons.attachment,
+            color: Color(0xFF24528A),
+          ),
         ),
-        icon: Icon(icon, size: 18),
-        label: Text(label, style: const TextStyle(fontSize: 13.5, fontWeight: FontWeight.w700)),
-      ),
-    );
-  }
-
-  Widget _buildMiniInfoRow(String title, String value) {
-    return Padding(
-      padding: const EdgeInsets.only(bottom: 7),
-      child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 10),
-        decoration: BoxDecoration(color: Colors.white.withOpacity(0.9), borderRadius: BorderRadius.circular(12), border: Border.all(color: borderColor)),
-        child: Row(
+        title: Text(
+          attachment.subDocumentTitle,
+          style: const TextStyle(
+            fontWeight: FontWeight.bold,
+          ),
+        ),
+        subtitle: Text(
+          'الرقم: '
+          '${attachment.subDocumentNumber}'
+          '   |   التاريخ: '
+          '${attachment.subDocumentDate}'
+          '${attachment.pageCount == null ? '' : '   |   الصفحات: ${attachment.pageCount}'}',
+        ),
+        trailing: Wrap(
+          spacing: 4,
           children: [
-            Expanded(child: Text(value.isEmpty ? '-' : value, textAlign: TextAlign.right, style: TextStyle(color: darkColor, fontWeight: FontWeight.w600, fontSize: 13.2))),
-            const SizedBox(width: 8),
-            Text('$title:', style: TextStyle(color: softTextColor, fontWeight: FontWeight.w700, fontSize: 12.3)),
+            pdfButton(
+              id: attachment.id,
+              recordType: 'attachment',
+              hasPdf: attachment.hasPdf,
+              title:
+                  attachment.subDocumentTitle,
+            ),
+            IconButton(
+              tooltip: 'تعديل',
+              onPressed: () =>
+                  editAttachment(attachment),
+              icon: const Icon(
+                Icons.edit_outlined,
+              ),
+            ),
           ],
         ),
       ),
     );
   }
 
-  Widget _buildSearchCard() {
-    return Container(
-      padding: const EdgeInsets.all(16),
-      decoration: _cardDecoration(),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
+  Widget groupCard(SearchGroup group) {
+    final document = group.parent;
+
+    return Card(
+      margin: const EdgeInsets.only(
+        bottom: 14,
+      ),
+      elevation: 0,
+      shape: RoundedRectangleBorder(
+        borderRadius:
+            BorderRadius.circular(14),
+        side: const BorderSide(
+          color: Color(0xFFDCE6F2),
+        ),
+      ),
+      child: ExpansionTile(
+        initiallyExpanded: true,
+        leading: const CircleAvatar(
+          backgroundColor:
+              Color(0xFF24528A),
+          foregroundColor: Colors.white,
+          child: Icon(
+            Icons.folder_outlined,
+          ),
+        ),
+        title: Text(
+          'العنوان: ${document.documentTitle}'
+          '   |   الرقم: ${document.documentNumber}'
+          '   |   التاريخ: ${document.documentDate}'
+          '   |   الحالة: ${document.status}',
+          style: const TextStyle(
+            fontWeight: FontWeight.bold,
+            color: Color(0xFF173A64),
+          ),
+        ),
+        subtitle: document.pageCount == null
+            ? null
+            : Text(
+                'عدد الصفحات: '
+                '${document.pageCount}',
+              ),
+        onExpansionChanged: (_) {
+          if (document.hasPdf) {
+            previewPdf(
+              id: document.id,
+              recordType: 'main',
+              title: document.documentTitle,
+            );
+          }
+        },
+        trailing: Wrap(
+          spacing: 4,
+          children: [
+            pdfButton(
+              id: document.id,
+              recordType: 'main',
+              hasPdf: document.hasPdf,
+              title: document.documentTitle,
+            ),
+            IconButton(
+              tooltip: 'تعديل',
+              onPressed: () =>
+                  editMainDocument(document),
+              icon: const Icon(
+                Icons.edit_outlined,
+              ),
+            ),
+            const Icon(
+              Icons.expand_more,
+            ),
+          ],
+        ),
         children: [
-          _buildSectionTitle('البحث عن ملف', icon: Icons.search_rounded),
+          if (document.notes.isNotEmpty)
+            ListTile(
+              leading: const Icon(Icons.notes),
+              title: Text(document.notes),
+            ),
+          if (group.attachments.isEmpty)
+            const Padding(
+              padding: EdgeInsets.all(18),
+              child: Text(
+                'لا توجد كتب تابعة لهذا الملف.',
+              ),
+            )
+          else
+            ...group.attachments.map(
+              attachmentTile,
+            ),
           const SizedBox(height: 10),
-          _buildTextField(
-            label: 'رقم الملف أو نص البحث',
-            icon: Icons.manage_search_rounded,
-            controller: _searchController,
-            hint: 'مثال: 12345 أو كلمة من الملاحظات',
-            onChanged: _onSearchTextChanged,
-          ),
-          const SizedBox(height: 10),
-          Row(
-            children: [
-              Expanded(child: _buildActionButton(onPressed: _isSearching ? null : _searchDocument, label: _isSearching ? 'جاري البحث...' : 'بحث', icon: Icons.search, loading: _isSearching)),
-              const SizedBox(width: 8),
-              Expanded(child: _buildOutlinedActionButton(onPressed: _clearSearch, label: 'مسح', icon: Icons.close)),
-            ],
-          ),
         ],
       ),
     );
   }
 
-  Widget _buildAttachmentCard(DocumentModel attachment) {
-    final parentTitle = _parentTitleFor(attachment);
-    final parentNumber = _parentNumberFor(attachment);
+  Widget buildPdfPreviewPanel() {
+    final bytes = selectedPdfBytes;
 
-    return Padding(
-      padding: const EdgeInsets.only(bottom: 8),
-      child: InkWell(
-        onTap: () => _selectDocument(attachment),
-        borderRadius: BorderRadius.circular(14),
-        child: Container(
-          padding: const EdgeInsets.all(12),
-          decoration: BoxDecoration(color: Colors.white.withOpacity(0.9), borderRadius: BorderRadius.circular(14), border: Border.all(color: borderColor)),
-          child: Row(
-            children: [
-              Container(width: 42, height: 42, decoration: BoxDecoration(gradient: _mainGradient, borderRadius: BorderRadius.circular(12)), child: const Icon(Icons.attach_file_rounded, color: Colors.white, size: 22)),
-              const SizedBox(width: 10),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.end,
-                  children: [
-                    Text('كتاب تابع رقم ${attachment.documentNumber}', textAlign: TextAlign.right, style: TextStyle(color: darkColor, fontWeight: FontWeight.w800, fontSize: 13.5)),
-                    const SizedBox(height: 4),
-                    Text(attachment.documentTitle.isEmpty ? 'بدون عنوان' : attachment.documentTitle, textAlign: TextAlign.right, maxLines: 1, overflow: TextOverflow.ellipsis, style: TextStyle(color: softTextColor, fontWeight: FontWeight.w600, fontSize: 12.5)),
-                    const SizedBox(height: 4),
-                    Text('التأريخ: ${attachment.documentDate.isEmpty ? '-' : attachment.documentDate}', textAlign: TextAlign.right, style: TextStyle(color: softTextColor, fontSize: 12)),
-                    if ((attachment.category ?? '').trim().isNotEmpty) ...[
-                      const SizedBox(height: 4),
-                      Text('التصنيف: ${attachment.category}', textAlign: TextAlign.right, style: TextStyle(color: accentDarkColor, fontWeight: FontWeight.w700, fontSize: 12)),
-                    ],
-                    if (parentTitle.isNotEmpty || parentNumber.isNotEmpty) ...[
-                      const SizedBox(height: 4),
-                      Text(
-                        'الأصل: ${parentNumber.isEmpty ? '-' : parentNumber} - ${parentTitle.isEmpty ? '-' : parentTitle}',
-                        textAlign: TextAlign.right,
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: TextStyle(color: accentDarkColor, fontWeight: FontWeight.w700, fontSize: 12),
-                      ),
-                    ],
-                  ],
+    return Card(
+      margin: EdgeInsets.zero,
+      elevation: 0,
+      shape: RoundedRectangleBorder(
+        borderRadius:
+            BorderRadius.circular(16),
+        side: const BorderSide(
+          color: Color(0xFFDCE6F2),
+        ),
+      ),
+      child: Padding(
+        padding: const EdgeInsets.all(14),
+        child: Column(
+          crossAxisAlignment:
+              CrossAxisAlignment.stretch,
+          children: [
+            Row(
+              children: [
+                Expanded(
+                  child: Text(
+                    selectedPdfTitle.isEmpty
+                        ? 'معاينة الكتاب'
+                        : selectedPdfTitle,
+                    maxLines: 2,
+                    overflow:
+                        TextOverflow.ellipsis,
+                    style: const TextStyle(
+                      fontSize: 18,
+                      fontWeight:
+                          FontWeight.bold,
+                      color:
+                          Color(0xFF173A64),
+                    ),
+                  ),
                 ),
+                FilledButton.icon(
+                  onPressed:
+                      bytes == null ||
+                              isPdfLoading
+                          ? null
+                          : printSelectedPdf,
+                  icon: const Icon(
+                    Icons.print_outlined,
+                  ),
+                  label:
+                      const Text('طباعة'),
+                ),
+              ],
+            ),
+            const SizedBox(height: 12),
+            Expanded(
+              child: Container(
+                decoration: BoxDecoration(
+                  color:
+                      const Color(0xFFF7FAFE),
+                  borderRadius:
+                      BorderRadius.circular(12),
+                  border: Border.all(
+                    color:
+                        const Color(0xFFDCE6F2),
+                  ),
+                ),
+                clipBehavior: Clip.antiAlias,
+                child: isPdfLoading
+                    ? const Center(
+                        child:
+                            CircularProgressIndicator(),
+                      )
+                    : bytes == null
+                        ? const Center(
+                            child: Column(
+                              mainAxisSize:
+                                  MainAxisSize.min,
+                              children: [
+                                Icon(
+                                  Icons
+                                      .picture_as_pdf_outlined,
+                                  size: 72,
+                                  color: Color(
+                                    0xFF7890AC,
+                                  ),
+                                ),
+                                SizedBox(height: 14),
+                                Text(
+                                  'انقر على أي كتاب لعرض صفحاته هنا',
+                                  textAlign:
+                                      TextAlign.center,
+                                  style: TextStyle(
+                                    color: Color(
+                                      0xFF65758B,
+                                    ),
+                                  ),
+                                ),
+                              ],
+                            ),
+                          )
+                        : PdfPreview(
+                            key: ValueKey(
+                              '$selectedPdfRecordType-'
+                              '$selectedPdfId-'
+                              '${bytes.length}',
+                            ),
+                            build: (_) async =>
+                                bytes,
+                            allowPrinting: false,
+                            allowSharing: false,
+                            canChangeOrientation:
+                                false,
+                            canChangePageFormat:
+                                false,
+                            canDebug: false,
+                            useActions: false,
+                            pdfFileName:
+                                'archive_document.pdf',
+                          ),
               ),
-              Icon(Icons.chevron_left_rounded, color: accentColor, size: 24),
-            ],
-          ),
+            ),
+          ],
         ),
       ),
     );
   }
 
-  Widget _buildResultCard() {
-    final activeDocument = _searchedDocument;
-    return Container(
-      padding: const EdgeInsets.all(16),
-      decoration: _cardDecoration(),
-      child: activeDocument == null
-          ? Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                _buildSectionTitle('نتيجة البحث', icon: Icons.assignment_outlined),
-                const SizedBox(height: 8),
-                Text('لم يتم العثور على أي ملف بعد.', style: TextStyle(color: softTextColor, fontSize: 13)),
-              ],
-            )
-          : Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                _buildSectionTitle('نتيجة البحث', icon: Icons.assignment_outlined),
-                const SizedBox(height: 10),
-                _buildMiniInfoRow('النوع', activeDocument.status.trim() == 'كتاب تابع' ? 'كتاب تابع' : 'ملف رئيسي'),
-                _buildMiniInfoRow('رقم الملف', activeDocument.documentNumber),
-                if (activeDocument.status.trim() == 'كتاب تابع') ...[
-                  _buildMiniInfoRow('رقم الملف الأصلي', _parentNumberFor(activeDocument)),
-                  _buildMiniInfoRow('اسم الملف الأصلي', _parentTitleFor(activeDocument)),
-                ],
-                _buildMiniInfoRow('تأريخ الملف', activeDocument.documentDate),
-                _buildMiniInfoRow('اسم الملف', activeDocument.documentTitle),
-                _buildMiniInfoRow('التصنيف', activeDocument.category ?? ''),
-                _buildMiniInfoRow('ملاحظات', activeDocument.notes),
-                _buildMiniInfoRow('الحالة', activeDocument.status),
-                _buildMiniInfoRow('تاريخ التذكير', activeDocument.reminderDate ?? ''),
-                _buildMiniInfoRow('عدد الصور', _previewImages.isNotEmpty ? _previewImages.length.toString() : activeDocument.imagePaths.length.toString()),
-                _buildMiniInfoRow('مسار الفولدر', activeDocument.folderPath),
-                const SizedBox(height: 8),
-                _buildActionButton(
-                  onPressed: () => Navigator.pop(context, activeDocument),
-                  label: 'تعبئة الحقول في صفحة الإدخال',
-                  icon: Icons.edit_note_outlined,
-                ),
-                const SizedBox(height: 8),
-                _buildActionButton(
-                  onPressed: _isPrinting ? null : _printCurrentDocument,
-                  label: _isPrinting ? 'جاري تجهيز الطباعة...' : 'طباعة الملف',
-                  icon: Icons.print_outlined,
-                  dark: true,
-                  loading: _isPrinting,
-                ),
-                if (_searchedAttachments.isNotEmpty) ...[
-                  const SizedBox(height: 12),
-                  Text('الكتب التابعة داخل هذا الملف (${_searchedAttachments.length})', style: TextStyle(fontSize: 14, fontWeight: FontWeight.w800, color: darkColor)),
-                  const SizedBox(height: 8),
-                  ..._searchedAttachments.map(_buildAttachmentCard),
-                ],
-                if (_searchResults.length > 1) ...[
-                  const SizedBox(height: 10),
-                  Text('نتائج مرتبطة (${_searchResults.length})', style: TextStyle(fontSize: 13, fontWeight: FontWeight.w700, color: darkColor)),
-                  const SizedBox(height: 6),
-                  ..._searchResults.take(8).map(
-                        (doc) => Padding(
-                          padding: const EdgeInsets.only(bottom: 5),
-                          child: InkWell(
-                            onTap: () => _selectDocument(doc),
-                            child: Container(
-                              padding: const EdgeInsets.all(10),
-                              decoration: BoxDecoration(color: Colors.white.withOpacity(0.88), borderRadius: BorderRadius.circular(12), border: Border.all(color: borderColor)),
-                              child: Text(
-                                '${doc.status.trim() == 'كتاب تابع' ? 'تابع' : 'رئيسي'} | ${doc.documentNumber} - ${doc.documentTitle}${(doc.category ?? '').trim().isNotEmpty ? ' | ${doc.category}' : ''}',
-                                textAlign: TextAlign.right,
-                                style: TextStyle(color: darkColor, fontWeight: FontWeight.w600, fontSize: 12.5),
-                              ),
-                            ),
-                          ),
-                        ),
-                      ),
-                ],
-              ],
+  Widget buildSearchResultsPanel() {
+    if (isLoading) {
+      return const Center(
+        child: CircularProgressIndicator(),
+      );
+    }
+
+    if (groups.isEmpty) {
+      return const Center(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(
+              Icons.search_off,
+              size: 70,
+              color: Color(0xFF8192A8),
             ),
-    );
-  }
-
-  Widget _buildLargePreviewCard() {
-    final validPaths = _previewImages.where((path) => File(path).existsSync()).toList();
-    final hasImages = validPaths.isNotEmpty;
-    final currentPath = hasImages ? validPaths[_currentPreviewIndex.clamp(0, validPaths.length - 1).toInt()] : null;
-
-    return Container(
-      padding: const EdgeInsets.all(16),
-      decoration: _cardDecoration(),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          _buildSectionTitle('الصورة الكاملة', icon: Icons.image_outlined),
-          const SizedBox(height: 12),
-          Expanded(
-            child: Container(
-              width: double.infinity,
-              decoration: BoxDecoration(color: Colors.white.withOpacity(0.9), borderRadius: BorderRadius.circular(18), border: Border.all(color: borderColor)),
-              child: !hasImages
-                  ? Center(child: Text('ستظهر صورة الملف هنا بعد البحث', style: TextStyle(color: softTextColor, fontWeight: FontWeight.w700)))
-                  : Stack(
-                      alignment: Alignment.center,
-                      children: [
-                        InteractiveViewer(child: Image.file(File(currentPath!), fit: BoxFit.contain)),
-                        if (validPaths.length > 1) ...[
-                          Positioned(left: 20, child: _arrowButton(Icons.chevron_left_rounded, _previousImage)),
-                          Positioned(right: 20, child: _arrowButton(Icons.chevron_right_rounded, _nextImage)),
-                        ],
-                      ],
-                    ),
+            SizedBox(height: 12),
+            Text(
+              'اكتبي كلمة للبحث في الأرشيف',
             ),
-          ),
-          const SizedBox(height: 12),
-          if (hasImages) _buildThumbnails(validPaths),
-          const SizedBox(height: 10),
-          Container(
-            width: double.infinity,
-            padding: const EdgeInsets.all(12),
-            decoration: BoxDecoration(color: const Color(0xFFDFF0FF), borderRadius: BorderRadius.circular(16), border: Border.all(color: borderColor)),
-            child: Text('عدد الصفحات: ${validPaths.length}${hasImages ? '    الصفحة ${_currentPreviewIndex + 1} من ${validPaths.length}' : ''}', textAlign: TextAlign.center, style: TextStyle(color: darkColor, fontWeight: FontWeight.w800)),
-          ),
-        ],
-      ),
+          ],
+        ),
+      );
+    }
+
+    return ListView.builder(
+      padding: const EdgeInsets.all(12),
+      itemCount: groups.length,
+      itemBuilder: (_, index) {
+        return groupCard(groups[index]);
+      },
     );
-  }
-
-  Widget _arrowButton(IconData icon, VoidCallback onPressed) {
-    return Material(
-      color: Colors.white.withOpacity(0.9),
-      borderRadius: BorderRadius.circular(14),
-      child: IconButton(onPressed: onPressed, icon: Icon(icon, color: accentDarkColor), iconSize: 30),
-    );
-  }
-
-  Widget _buildThumbnails(List<String> paths) {
-    return SizedBox(
-      height: 96,
-      child: ListView.separated(
-        scrollDirection: Axis.horizontal,
-        itemCount: paths.length,
-        separatorBuilder: (_, __) => const SizedBox(width: 10),
-        itemBuilder: (context, index) {
-          final isSelected = index == _currentPreviewIndex;
-          return InkWell(
-            onTap: () => setState(() => _currentPreviewIndex = index),
-            child: Container(
-              width: 82,
-              decoration: BoxDecoration(borderRadius: BorderRadius.circular(14), border: Border.all(color: isSelected ? accentColor : borderColor, width: isSelected ? 3 : 1)),
-              child: ClipRRect(borderRadius: BorderRadius.circular(12), child: Image.file(File(paths[index]), fit: BoxFit.cover)),
-            ),
-          );
-        },
-      ),
-    );
-  }
-
-  void _nextImage() {
-    if (_previewImages.length <= 1) return;
-    setState(() => _currentPreviewIndex = (_currentPreviewIndex + 1) % _previewImages.length);
-  }
-
-  void _previousImage() {
-    if (_previewImages.length <= 1) return;
-    setState(() => _currentPreviewIndex = (_currentPreviewIndex - 1 + _previewImages.length) % _previewImages.length);
-  }
-
-  Widget _buildRightColumn() {
-    return SingleChildScrollView(
-      child: Column(
-        children: [
-          Row(
-            children: [
-              Expanded(child: _buildActionButton(onPressed: () => Navigator.pop(context), label: 'رجوع للإدخال', icon: Icons.arrow_back_rounded, dark: true)),
-            ],
-          ),
-          const SizedBox(height: 12),
-          _buildSearchCard(),
-          const SizedBox(height: 12),
-          _buildResultCard(),
-        ],
-      ),
-    );
-  }
-
-  @override
-  void dispose() {
-    _searchDebounce?.cancel();
-    _searchController.dispose();
-    super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
-    return Directionality(
-      textDirection: ui.TextDirection.rtl,
-      child: Scaffold(
-        backgroundColor: bgColor,
-        body: SafeArea(
-          child: LayoutBuilder(
-            builder: (context, constraints) {
-              final isWide = constraints.maxWidth > 1100;
-              return Container(
-                width: double.infinity,
-                height: double.infinity,
-                margin: const EdgeInsets.all(10),
-                padding: const EdgeInsets.all(14),
-                decoration: BoxDecoration(
-                  gradient: const LinearGradient(colors: [Color(0xFFE9F7FF), Color(0xFFD4ECFF)], begin: Alignment.topRight, end: Alignment.bottomLeft),
-                  borderRadius: BorderRadius.circular(22),
-                ),
-                child: isWide
-                    ? Row(
-                        crossAxisAlignment: CrossAxisAlignment.stretch,
-                        children: [
-                          Expanded(flex: 7, child: _buildLargePreviewCard()),
-                          const SizedBox(width: 14),
-                          Expanded(flex: 5, child: _buildRightColumn()),
-                        ],
-                      )
-                    : SingleChildScrollView(
-                        child: SizedBox(
-                          height: 1000,
-                          child: Column(
-                            children: [
-                              SizedBox(height: 520, child: _buildLargePreviewCard()),
-                              const SizedBox(height: 12),
-                              _buildRightColumn(),
-                            ],
-                          ),
+    return Scaffold(
+      backgroundColor:
+          const Color(0xFFF2F6FB),
+      appBar: AppBar(
+        title: const Text(
+          'البحث في الأرشيف',
+        ),
+        backgroundColor:
+            const Color(0xFF173A64),
+        foregroundColor: Colors.white,
+      ),
+      body: Column(
+        children: [
+          Container(
+            color: Colors.white,
+            padding: const EdgeInsets.all(18),
+            child: Row(
+              children: [
+                Expanded(
+                  child: TextField(
+                    controller:
+                        searchController,
+                    autofocus: true,
+                    textInputAction:
+                        TextInputAction.search,
+                    onSubmitted: (_) =>
+                        search(),
+                    decoration:
+                        InputDecoration(
+                      labelText:
+                          'رقم أو اسم الكتاب أو الملاحظات',
+                      prefixIcon:
+                          const Icon(
+                        Icons.search,
+                      ),
+                      border:
+                          OutlineInputBorder(
+                        borderRadius:
+                            BorderRadius.circular(
+                          12,
                         ),
                       ),
-              );
-            },
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 12),
+                SizedBox(
+                  height: 52,
+                  child: FilledButton.icon(
+                    onPressed:
+                        isLoading ? null : search,
+                    icon: isLoading
+                        ? const SizedBox(
+                            width: 18,
+                            height: 18,
+                            child:
+                                CircularProgressIndicator(
+                              strokeWidth: 2,
+                              color: Colors.white,
+                            ),
+                          )
+                        : const Icon(
+                            Icons.manage_search,
+                          ),
+                    label: const Text('بحث'),
+                  ),
+                ),
+              ],
+            ),
           ),
-        ),
+          if (totalItems > 0)
+            Padding(
+              padding: const EdgeInsets.fromLTRB(
+                18,
+                10,
+                18,
+                0,
+              ),
+              child: Align(
+                alignment:
+                    Alignment.centerRight,
+                child: Text(
+                  'عدد النتائج: $totalItems',
+                  style: const TextStyle(
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+              ),
+            ),
+          Expanded(
+            child: LayoutBuilder(
+              builder: (context, constraints) {
+                final wide =
+                    constraints.maxWidth >= 1000;
+
+                if (wide) {
+                  return Padding(
+                    padding:
+                        const EdgeInsets.all(14),
+                    child: Row(
+                      crossAxisAlignment:
+                          CrossAxisAlignment.stretch,
+                      children: [
+                        Expanded(
+                          flex: 5,
+                          child:
+                              buildSearchResultsPanel(),
+                        ),
+                        const SizedBox(width: 14),
+                        Expanded(
+                          flex: 5,
+                          child:
+                              buildPdfPreviewPanel(),
+                        ),
+                      ],
+                    ),
+                  );
+                }
+
+                return Column(
+                  children: [
+                    Expanded(
+                      child:
+                          buildSearchResultsPanel(),
+                    ),
+                    SizedBox(
+                      height: 520,
+                      child:
+                          buildPdfPreviewPanel(),
+                    ),
+                  ],
+                );
+              },
+            ),
+          ),
+          if (totalPages > 1)
+            Container(
+              color: Colors.white,
+              padding:
+                  const EdgeInsets.symmetric(
+                horizontal: 18,
+                vertical: 10,
+              ),
+              child: Row(
+                mainAxisAlignment:
+                    MainAxisAlignment.center,
+                children: [
+                  IconButton(
+                    tooltip: 'الصفحة السابقة',
+                    onPressed: currentPage > 1
+                        ? () => search(
+                              page:
+                                  currentPage - 1,
+                            )
+                        : null,
+                    icon: const Icon(
+                      Icons.chevron_right,
+                    ),
+                  ),
+                  Text(
+                    'صفحة $currentPage '
+                    'من $totalPages',
+                    style: const TextStyle(
+                      fontWeight: FontWeight.bold,
+                    ),
+                  ),
+                  IconButton(
+                    tooltip: 'الصفحة التالية',
+                    onPressed:
+                        currentPage < totalPages
+                            ? () => search(
+                                  page:
+                                      currentPage +
+                                          1,
+                                )
+                            : null,
+                    icon: const Icon(
+                      Icons.chevron_left,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+        ],
       ),
-    );
-  }
-}
-
-class _SearchGroup {
-  final DocumentModel parent;
-  final List<DocumentModel> attachments;
-  final String matchText;
-
-  const _SearchGroup({
-    required this.parent,
-    required this.attachments,
-    required this.matchText,
-  });
-}
-
-extension _DocumentCopy on DocumentModel {
-  DocumentModel copyWith({String? status}) {
-    return DocumentModel(
-      id: id,
-      documentNumber: documentNumber,
-      documentDate: documentDate,
-      documentTitle: documentTitle,
-      category: category,
-      notes: notes,
-      status: status ?? this.status,
-      reminderDate: reminderDate,
-      reminderNote: reminderNote,
-      folderPath: folderPath,
-      imagePaths: imagePaths,
     );
   }
 }
