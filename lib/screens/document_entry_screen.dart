@@ -369,7 +369,7 @@ class _DocumentEntryScreenState
 
       _showMessage(
         'تم فتح برنامج جهاز الأرشفة. '
-        'بعد انتهاء السحب اضغطي استيراد الصور.',
+        'بعد انتهاء السحب اضغط استيراد الصور.',
       );
     } catch (exception) {
       _showMessage(
@@ -1094,7 +1094,7 @@ class _DocumentEntryScreenState
               ),
             ),
             subtitle: const Text(
-              'فعّليه عند سحب عدة كتب، '
+              'فعله عند سحب عدة كتب، '
               'كل كتاب منها صفحة واحدة.',
             ),
             value: separateEachPage,
@@ -1658,25 +1658,42 @@ class _DocumentEntryScreenState
                             child: Padding(
                               padding:
                                   const EdgeInsets
-                                      .all(12),
-                              child: Image.file(
-                                File(
-                                  sourceImagePaths[
-                                      previewIndex],
+                                      .all(4),
+                              child:
+                                  InteractiveViewer(
+                                minScale: 1,
+                                maxScale: 6,
+                                boundaryMargin:
+                                    const EdgeInsets
+                                        .all(100),
+                                clipBehavior:
+                                    Clip.hardEdge,
+                                child: Image.file(
+                                  File(
+                                    sourceImagePaths[
+                                        previewIndex],
+                                  ),
+                                  width:
+                                      double.infinity,
+                                  height:
+                                      double.infinity,
+                                  fit:
+                                      BoxFit.contain,
+                                  filterQuality:
+                                      FilterQuality
+                                          .high,
+                                  errorBuilder: (
+                                    _,
+                                    __,
+                                    ___,
+                                  ) {
+                                    return const Center(
+                                      child: Text(
+                                        'تعذر عرض الصفحة',
+                                      ),
+                                    );
+                                  },
                                 ),
-                                fit:
-                                    BoxFit.contain,
-                                errorBuilder: (
-                                  _,
-                                  __,
-                                  ___,
-                                ) {
-                                  return const Center(
-                                    child: Text(
-                                      'تعذر عرض الصفحة',
-                                    ),
-                                  );
-                                },
                               ),
                             ),
                           ),

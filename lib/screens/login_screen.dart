@@ -4,6 +4,22 @@ import 'package:flutter/services.dart';
 import '../services/api_service.dart';
 import 'document_entry_screen.dart';
 
+// =====================================================
+// بيانات الدخول الخاصة بهذه النسخة
+// تغيير هذه الاسطر فقط عند بناء نسخ جديدة 
+// =====================================================
+
+const String appUsername = 'archive1';
+const String appPassword = 'Archive1';
+
+// =====================================================
+// مفتاح الاتصال الداخلي مع login.php
+// لا تغيّر هذا السطر
+// =====================================================
+
+const String internalAppLoginKey =
+    'ArchiveStandard_Internal_2026_FZ_8K4P7M2X';
+
 class LoginScreen extends StatefulWidget {
   const LoginScreen({super.key});
 
@@ -12,8 +28,7 @@ class LoginScreen extends StatefulWidget {
       _LoginScreenState();
 }
 
-class _LoginScreenState
-    extends State<LoginScreen> {
+class _LoginScreenState extends State<LoginScreen> {
   final usernameController =
       TextEditingController();
 
@@ -62,8 +77,7 @@ class _LoginScreenState
 
     if (username.isEmpty) {
       setState(() {
-        errorMessage =
-            'اكتبي اسم المستخدم.';
+        errorMessage = 'اكتب اسم المستخدم.';
       });
 
       usernameFocusNode.requestFocus();
@@ -72,10 +86,27 @@ class _LoginScreenState
 
     if (password.isEmpty) {
       setState(() {
-        errorMessage =
-            'اكتبي كلمة المرور.';
+        errorMessage = 'اكتب كلمة المرور.';
       });
 
+      passwordFocusNode.requestFocus();
+      return;
+    }
+
+    /*
+    |--------------------------------------------------------------------------
+    | التحقق من بيانات الدخول المكتوبة في أعلى الملف
+    |--------------------------------------------------------------------------
+    */
+
+    if (username != appUsername ||
+        password != appPassword) {
+      setState(() {
+        errorMessage =
+            'اسم المستخدم أو كلمة المرور غير صحيحة.';
+      });
+
+      passwordController.clear();
       passwordFocusNode.requestFocus();
       return;
     }
@@ -88,12 +119,17 @@ class _LoginScreenState
     });
 
     try {
+      /*
+      |--------------------------------------------------------------------------
+      | طلب جلسة آمنة من PHP
+      |--------------------------------------------------------------------------
+      */
+
       final response =
           await ApiService.postJson(
         'login.php',
         {
-          'username': username,
-          'password': password,
+          'app_key': internalAppLoginKey,
         },
         authenticated: false,
       );
@@ -127,39 +163,6 @@ class _LoginScreenState
         token: token,
         expiresAt: expiresAt,
       );
-
-      final userValue = response['user'];
-
-      final user =
-          userValue is Map
-              ? Map<String, dynamic>.from(
-                  userValue,
-                )
-              : <String, dynamic>{};
-
-      final mustChangePassword =
-          response['must_change_password'] ==
-                  true ||
-              user['must_change_password'] ==
-                  true ||
-              user['must_change_password'] ==
-                  1;
-
-      if (mustChangePassword) {
-        ApiService.clearSession();
-
-        if (!mounted) {
-          return;
-        }
-
-        setState(() {
-          errorMessage =
-              'يجب تغيير كلمة المرور الأولية '
-              'قبل استخدام التطبيق.';
-        });
-
-        return;
-      }
 
       passwordController.clear();
 
@@ -310,7 +313,7 @@ class _LoginScreenState
                     ),
                     const SizedBox(height: 8),
                     const Text(
-                      'سجّلي الدخول للمتابعة',
+                      'سجّل الدخول للمتابعة',
                       style: TextStyle(
                         fontSize: 14,
                         color:
@@ -318,6 +321,13 @@ class _LoginScreenState
                       ),
                     ),
                     const SizedBox(height: 28),
+
+                    /*
+                    |--------------------------------------------------------------------------
+                    | حقل اسم المستخدم
+                    |--------------------------------------------------------------------------
+                    */
+
                     TextField(
                       controller:
                           usernameController,
@@ -354,6 +364,13 @@ class _LoginScreenState
                       ),
                     ),
                     const SizedBox(height: 16),
+
+                    /*
+                    |--------------------------------------------------------------------------
+                    | حقل كلمة المرور
+                    |--------------------------------------------------------------------------
+                    */
+
                     TextField(
                       controller:
                           passwordController,
@@ -411,6 +428,13 @@ class _LoginScreenState
                         ),
                       ),
                     ),
+
+                    /*
+                    |--------------------------------------------------------------------------
+                    | رسالة الخطأ
+                    |--------------------------------------------------------------------------
+                    */
+
                     if (errorMessage
                         .isNotEmpty) ...[
                       const SizedBox(
@@ -445,7 +469,15 @@ class _LoginScreenState
                         ),
                       ),
                     ],
+
                     const SizedBox(height: 22),
+
+                    /*
+                    |--------------------------------------------------------------------------
+                    | زر الدخول
+                    |--------------------------------------------------------------------------
+                    */
+
                     SizedBox(
                       width: double.infinity,
                       height: 50,
@@ -485,8 +517,7 @@ class _LoginScreenState
                                     TextStyle(
                                   fontSize: 16,
                                   fontWeight:
-                                      FontWeight
-                                          .bold,
+                                      FontWeight.bold,
                                 ),
                               ),
                       ),

@@ -196,12 +196,43 @@ class DocumentStorageService {
     return match?.group(0) ?? 'unknown';
   }
 
+  static String _monthFromDate(
+    String date,
+  ) {
+    final match = RegExp(
+      r'^\d{4}-(\d{2})',
+    ).firstMatch(date.trim());
+
+    final month = match?.group(1);
+
+    if (month == null) {
+      return 'unknown_month';
+    }
+
+    final monthNumber =
+        int.tryParse(month);
+
+    if (
+        monthNumber == null ||
+        monthNumber < 1 ||
+        monthNumber > 12) {
+      return 'unknown_month';
+    }
+
+    return monthNumber
+        .toString()
+        .padLeft(2, '0');
+  }
+
   static String buildMainRelativeFolder({
     required String documentNumber,
     required String documentDate,
   }) {
     final year =
         _yearFromDate(documentDate);
+
+    final month =
+        _monthFromDate(documentDate);
 
     final number = safePathPart(
       documentNumber,
@@ -212,7 +243,7 @@ class DocumentStorageService {
     final uniqueId =
         generateBatchId();
 
-    return 'documents/$year/'
+    return 'documents/$year/$month/'
         'document_${number}_$uniqueId';
   }
 
@@ -224,6 +255,9 @@ class DocumentStorageService {
   }) {
     final year =
         _yearFromDate(subDocumentDate);
+
+    final month =
+        _monthFromDate(subDocumentDate);
 
     final number = safePathPart(
       subDocumentNumber,
@@ -237,6 +271,7 @@ class DocumentStorageService {
     return 'attachments/'
         '$parentDocumentId/'
         '$year/'
+        '$month/'
         'attachment_${number}_$uniqueId';
   }
 

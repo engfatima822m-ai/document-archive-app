@@ -1,3 +1,5 @@
+import 'dart:typed_data';
+
 import 'package:flutter/material.dart';
 import 'package:printing/printing.dart';
 
@@ -35,6 +37,12 @@ class _DocumentSearchScreenState
   int currentPage = 1;
   int totalPages = 0;
   int totalItems = 0;
+
+  Uint8List? selectedPdfBytes;
+  String selectedPdfTitle = '';
+  int? selectedPdfId;
+  String? selectedPdfRecordType;
+  bool isPdfLoading = false;
 
   @override
   void dispose() {
@@ -171,6 +179,10 @@ class _DocumentSearchScreenState
 
       setState(() {
         groups = parsedGroups;
+        selectedPdfBytes = null;
+        selectedPdfTitle = '';
+        selectedPdfId = null;
+        selectedPdfRecordType = null;
         currentPage =
             _parseInt(pagination['page']) ??
                 page;
@@ -210,9 +222,10 @@ class _DocumentSearchScreenState
     );
   }
 
-  Future<void> openPdf({
+  Future<void> previewPdf({
     required int? id,
     required String recordType,
+    required String title,
   }) async {
     if (id == null || id < 1) {
       showMessage(
@@ -222,21 +235,28 @@ class _DocumentSearchScreenState
       return;
     }
 
-    try {
-      showMessage(
-        'جاري تجهيز ملف PDF...',
-      );
+    if (isPdfLoading) return;
 
+    setState(() {
+      isPdfLoading = true;
+      selectedPdfBytes = null;
+      selectedPdfTitle = title;
+      selectedPdfId = id;
+      selectedPdfRecordType = recordType;
+    });
+
+    try {
       final bytes =
           await ApiService.getPdfBytes(
         id: id,
         recordType: recordType,
       );
 
-      await Printing.layoutPdf(
-        name: 'archive_document.pdf',
-        onLayout: (_) async => bytes,
-      );
+      if (!mounted) return;
+
+      setState(() {
+        selectedPdfBytes = bytes;
+      });
     } on ApiException catch (exception) {
       showMessage(
         exception.message,
@@ -245,6 +265,57 @@ class _DocumentSearchScreenState
     } catch (exception) {
       showMessage(
         'تعذر فتح ملف PDF: $exception',
+        isError: true,
+      );
+    } finally {
+      if (mounted) {
+        setState(() {
+          isPdfLoading = false;
+        });
+      }
+    }
+  }
+
+  Future<void> printSelectedPdf() async {
+    final bytes = selectedPdfBytes;
+
+    if (bytes == null || bytes.isEmpty) {
+      showMessage(
+        'اختاري كتابًا لعرضه أولًا.',
+        isError: true,
+      );
+      return;
+    }
+
+    try {
+      final selectedPrinter =
+          await Printing.pickPrinter(
+        context: context,
+        title: 'اختيار الطابعة',
+      );
+
+      if (selectedPrinter == null) {
+        return;
+      }
+
+      final printed =
+          await Printing.directPrintPdf(
+        printer: selectedPrinter,
+        name: selectedPdfTitle.isEmpty
+            ? 'archive_document.pdf'
+            : '$selectedPdfTitle.pdf',
+        onLayout: (_) async => bytes,
+      );
+
+      if (!printed) {
+        showMessage(
+          'لم تكتمل عملية الطباعة.',
+          isError: true,
+        );
+      }
+    } catch (exception) {
+      showMessage(
+        'تعذر تنفيذ الطباعة: $exception',
         isError: true,
       );
     }
@@ -960,19 +1031,21 @@ class _DocumentSearchScreenState
     required int? id,
     required String recordType,
     required bool hasPdf,
+    required String title,
   }) {
     return IconButton(
-      tooltip: 'عرض أو طباعة PDF',
+      tooltip: 'عرض PDF',
       onPressed: hasPdf
-          ? () => openPdf(
+          ? () => previewPdf(
                 id: id,
                 recordType: recordType,
+                title: title,
               )
           : null,
       icon: Icon(
-        Icons.picture_as_pdf,
+        Icons.visibility_outlined,
         color: hasPdf
-            ? const Color(0xFFC62828)
+            ? const Color(0xFF24528A)
             : Colors.grey,
       ),
     );
@@ -988,6 +1061,14 @@ class _DocumentSearchScreenState
         vertical: 5,
       ),
       child: ListTile(
+        onTap: attachment.hasPdf
+            ? () => previewPdf(
+                  id: attachment.id,
+                  recordType: 'attachment',
+                  title:
+                      attachment.subDocumentTitle,
+                )
+            : null,
         leading: const CircleAvatar(
           backgroundColor:
               Color(0xFFE0ECFA),
@@ -1016,6 +1097,8 @@ class _DocumentSearchScreenState
               id: attachment.id,
               recordType: 'attachment',
               hasPdf: attachment.hasPdf,
+              title:
+                  attachment.subDocumentTitle,
             ),
             IconButton(
               tooltip: 'تعديل',
@@ -1057,17 +1140,30 @@ class _DocumentSearchScreenState
           ),
         ),
         title: Text(
-          document.documentTitle,
+          'العنوان: ${document.documentTitle}'
+          '   |   الرقم: ${document.documentNumber}'
+          '   |   التاريخ: ${document.documentDate}'
+          '   |   الحالة: ${document.status}',
           style: const TextStyle(
             fontWeight: FontWeight.bold,
             color: Color(0xFF173A64),
           ),
         ),
-        subtitle: Text(
-          'الرقم: ${document.documentNumber}'
-          '   |   التاريخ: ${document.documentDate}'
-          '   |   الحالة: ${document.status}',
-        ),
+        subtitle: document.pageCount == null
+            ? null
+            : Text(
+                'عدد الصفحات: '
+                '${document.pageCount}',
+              ),
+        onExpansionChanged: (_) {
+          if (document.hasPdf) {
+            previewPdf(
+              id: document.id,
+              recordType: 'main',
+              title: document.documentTitle,
+            );
+          }
+        },
         trailing: Wrap(
           spacing: 4,
           children: [
@@ -1075,6 +1171,7 @@ class _DocumentSearchScreenState
               id: document.id,
               recordType: 'main',
               hasPdf: document.hasPdf,
+              title: document.documentTitle,
             ),
             IconButton(
               tooltip: 'تعديل',
@@ -1109,6 +1206,167 @@ class _DocumentSearchScreenState
           const SizedBox(height: 10),
         ],
       ),
+    );
+  }
+
+  Widget buildPdfPreviewPanel() {
+    final bytes = selectedPdfBytes;
+
+    return Card(
+      margin: EdgeInsets.zero,
+      elevation: 0,
+      shape: RoundedRectangleBorder(
+        borderRadius:
+            BorderRadius.circular(16),
+        side: const BorderSide(
+          color: Color(0xFFDCE6F2),
+        ),
+      ),
+      child: Padding(
+        padding: const EdgeInsets.all(14),
+        child: Column(
+          crossAxisAlignment:
+              CrossAxisAlignment.stretch,
+          children: [
+            Row(
+              children: [
+                Expanded(
+                  child: Text(
+                    selectedPdfTitle.isEmpty
+                        ? 'معاينة الكتاب'
+                        : selectedPdfTitle,
+                    maxLines: 2,
+                    overflow:
+                        TextOverflow.ellipsis,
+                    style: const TextStyle(
+                      fontSize: 18,
+                      fontWeight:
+                          FontWeight.bold,
+                      color:
+                          Color(0xFF173A64),
+                    ),
+                  ),
+                ),
+                FilledButton.icon(
+                  onPressed:
+                      bytes == null ||
+                              isPdfLoading
+                          ? null
+                          : printSelectedPdf,
+                  icon: const Icon(
+                    Icons.print_outlined,
+                  ),
+                  label:
+                      const Text('طباعة'),
+                ),
+              ],
+            ),
+            const SizedBox(height: 12),
+            Expanded(
+              child: Container(
+                decoration: BoxDecoration(
+                  color:
+                      const Color(0xFFF7FAFE),
+                  borderRadius:
+                      BorderRadius.circular(12),
+                  border: Border.all(
+                    color:
+                        const Color(0xFFDCE6F2),
+                  ),
+                ),
+                clipBehavior: Clip.antiAlias,
+                child: isPdfLoading
+                    ? const Center(
+                        child:
+                            CircularProgressIndicator(),
+                      )
+                    : bytes == null
+                        ? const Center(
+                            child: Column(
+                              mainAxisSize:
+                                  MainAxisSize.min,
+                              children: [
+                                Icon(
+                                  Icons
+                                      .picture_as_pdf_outlined,
+                                  size: 72,
+                                  color: Color(
+                                    0xFF7890AC,
+                                  ),
+                                ),
+                                SizedBox(height: 14),
+                                Text(
+                                  'انقر على أي كتاب لعرض صفحاته هنا',
+                                  textAlign:
+                                      TextAlign.center,
+                                  style: TextStyle(
+                                    color: Color(
+                                      0xFF65758B,
+                                    ),
+                                  ),
+                                ),
+                              ],
+                            ),
+                          )
+                        : PdfPreview(
+                            key: ValueKey(
+                              '$selectedPdfRecordType-'
+                              '$selectedPdfId-'
+                              '${bytes.length}',
+                            ),
+                            build: (_) async =>
+                                bytes,
+                            allowPrinting: false,
+                            allowSharing: false,
+                            canChangeOrientation:
+                                false,
+                            canChangePageFormat:
+                                false,
+                            canDebug: false,
+                            useActions: false,
+                            pdfFileName:
+                                'archive_document.pdf',
+                          ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget buildSearchResultsPanel() {
+    if (isLoading) {
+      return const Center(
+        child: CircularProgressIndicator(),
+      );
+    }
+
+    if (groups.isEmpty) {
+      return const Center(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(
+              Icons.search_off,
+              size: 70,
+              color: Color(0xFF8192A8),
+            ),
+            SizedBox(height: 12),
+            Text(
+              'اكتبي كلمة للبحث في الأرشيف',
+            ),
+          ],
+        ),
+      );
+    }
+
+    return ListView.builder(
+      padding: const EdgeInsets.all(12),
+      itemCount: groups.length,
+      itemBuilder: (_, index) {
+        return groupCard(groups[index]);
+      },
     );
   }
 
@@ -1204,44 +1462,50 @@ class _DocumentSearchScreenState
               ),
             ),
           Expanded(
-            child: isLoading
-                ? const Center(
-                    child:
-                        CircularProgressIndicator(),
-                  )
-                : groups.isEmpty
-                    ? const Center(
-                        child: Column(
-                          mainAxisSize:
-                              MainAxisSize.min,
-                          children: [
-                            Icon(
-                              Icons.search_off,
-                              size: 70,
-                              color:
-                                  Color(0xFF8192A8),
-                            ),
-                            SizedBox(height: 12),
-                            Text(
-                              'اكتبي كلمة للبحث في الأرشيف',
-                            ),
-                          ],
+            child: LayoutBuilder(
+              builder: (context, constraints) {
+                final wide =
+                    constraints.maxWidth >= 1000;
+
+                if (wide) {
+                  return Padding(
+                    padding:
+                        const EdgeInsets.all(14),
+                    child: Row(
+                      crossAxisAlignment:
+                          CrossAxisAlignment.stretch,
+                      children: [
+                        Expanded(
+                          flex: 5,
+                          child:
+                              buildSearchResultsPanel(),
                         ),
-                      )
-                    : ListView.builder(
-                        padding:
-                            const EdgeInsets.all(
-                          18,
+                        const SizedBox(width: 14),
+                        Expanded(
+                          flex: 5,
+                          child:
+                              buildPdfPreviewPanel(),
                         ),
-                        itemCount:
-                            groups.length,
-                        itemBuilder:
-                            (_, index) {
-                          return groupCard(
-                            groups[index],
-                          );
-                        },
-                      ),
+                      ],
+                    ),
+                  );
+                }
+
+                return Column(
+                  children: [
+                    Expanded(
+                      child:
+                          buildSearchResultsPanel(),
+                    ),
+                    SizedBox(
+                      height: 520,
+                      child:
+                          buildPdfPreviewPanel(),
+                    ),
+                  ],
+                );
+              },
+            ),
           ),
           if (totalPages > 1)
             Container(
