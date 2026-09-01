@@ -171,7 +171,7 @@ class ScannerService {
     if (_isScanning) {
       throw StateError(
         'توجد عملية سحب تعمل حاليًا. '
-        'انتظري حتى تنتهي قبل بدء عملية جديدة.',
+        'انتظر حتى تنتهي قبل بدء عملية جديدة.',
       );
     }
 
@@ -230,7 +230,7 @@ class ScannerService {
 
       throw Exception(
         'استغرقت عملية السحب وقتًا طويلًا. '
-        'تأكدي من الجهاز ثم حاولي مجددًا.',
+        'تأكد من الجهاز ثم حاول مجددًا.',
       );
     } catch (error, stackTrace) {
       debugPrint(

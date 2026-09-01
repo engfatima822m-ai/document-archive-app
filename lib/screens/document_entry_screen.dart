@@ -238,7 +238,7 @@ class _DocumentEntryScreenState
     final result =
         await FilePicker.platform.pickFiles(
       dialogTitle:
-          'اختاري صور المستند بالترتيب',
+          'اختار صور المستند بالترتيب',
       allowMultiple: true,
       type: FileType.custom,
       allowedExtensions: const [
@@ -461,7 +461,7 @@ class _DocumentEntryScreenState
 
     if (number.isEmpty) {
       _showMessage(
-        'اكتبي رقم الملف الأصلي.',
+        'اكتب رقم الملف الأصلي.',
         isError: true,
       );
       return;
@@ -617,7 +617,7 @@ class _DocumentEntryScreenState
       builder: (dialogContext) {
         return AlertDialog(
           title: const Text(
-            'اختاري الملف الأصلي',
+            'اختار الملف الأصلي',
           ),
           content: SizedBox(
             width: 520,
@@ -667,7 +667,7 @@ class _DocumentEntryScreenState
         (date.isEmpty && note.isNotEmpty) ||
         (date.isNotEmpty && note.isEmpty)) {
       _showMessage(
-        'أدخلي تاريخ التنبيه وملاحظته معًا.',
+        'أدخل تاريخ التنبيه وملاحظته معًا.',
         isError: true,
       );
 
@@ -682,7 +682,7 @@ class _DocumentEntryScreenState
 
     if (sourceImagePaths.isEmpty) {
       _showMessage(
-        'اسحبي أو اختاري صور المستند أولًا.',
+        'اكتب أو اختر صور المستند أولًا.',
         isError: true,
       );
       return;
@@ -704,7 +704,7 @@ class _DocumentEntryScreenState
     if (isAttachment &&
         selectedParent == null) {
       _showMessage(
-        'اختاري الملف الأصلي أولًا.',
+        'اختار الملف الأصلي أولًا.',
         isError: true,
       );
       return;
@@ -857,7 +857,7 @@ class _DocumentEntryScreenState
               .trim()
               .isEmpty) {
         _showMessage(
-          'أكملي رقم وتاريخ واسم '
+          'أكمل رقم وتاريخ واسم '
           'الكتاب رقم ${index + 1}.',
           isError: true,
         );
@@ -1355,7 +1355,7 @@ class _DocumentEntryScreenState
       return const Padding(
         padding: EdgeInsets.all(20),
         child: Text(
-          'اسحبي أو اختاري الصور أولًا، '
+          'اسحب أو اختار الصور أولًا، '
           'ثم ستظهر حقول كل كتاب.',
           textAlign: TextAlign.center,
         ),

@@ -76,7 +76,7 @@ class _DocumentSearchScreenState
 
     if (query.length < 2) {
       showMessage(
-        'اكتبي حرفين على الأقل للبحث.',
+        'اكتب حرفين على الأقل للبحث.',
         isError: true,
       );
       return;
@@ -281,7 +281,7 @@ class _DocumentSearchScreenState
 
     if (bytes == null || bytes.isEmpty) {
       showMessage(
-        'اختاري كتابًا لعرضه أولًا.',
+        'اختار كتابًا لعرضه أولًا.',
         isError: true,
       );
       return;
@@ -424,7 +424,7 @@ class _DocumentSearchScreenState
                   (reminderDate.isNotEmpty &&
                       reminderNote.isEmpty)) {
                 showMessage(
-                  'أدخلي تاريخ وملاحظة '
+                  'أدخل تاريخ وملاحظة '
                   'التنبيه معًا.',
                   isError: true,
                 );
@@ -784,7 +784,7 @@ class _DocumentSearchScreenState
                   (reminderDate.isNotEmpty &&
                       reminderNote.isEmpty)) {
                 showMessage(
-                  'أدخلي تاريخ وملاحظة '
+                  'أدخل تاريخ وملاحظة '
                   'التنبيه معًا.',
                   isError: true,
                 );
@@ -1354,7 +1354,7 @@ class _DocumentSearchScreenState
             ),
             SizedBox(height: 12),
             Text(
-              'اكتبي كلمة للبحث في الأرشيف',
+              'اكتب كلمة للبحث في الأرشيف',
             ),
           ],
         ),

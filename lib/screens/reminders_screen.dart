@@ -120,7 +120,7 @@ class _RemindersScreenState
       setState(() {
         _isLoading = false;
         _errorMessage =
-            'تعذر تحميل التنبيهات. تأكدي من تشغيل XAMPP ثم حاولي مجددًا.';
+            'تعذر تحميل التنبيهات. تأكد من تشغيل XAMPP ثم حاول مجددًا.';
       });
     }
   }
@@ -182,7 +182,7 @@ class _RemindersScreenState
         return AlertDialog(
           title: const Text('إنهاء التنبيه'),
           content: Text(
-            'هل تريدين إزالة التنبيه الخاص بالملف '
+            'هل تريد إزالة التنبيه الخاص بالملف '
             '"${reminder.documentNumber}"؟\n\n'
             'لن يتم حذف الملف أو بياناته، وإنما سيتم حذف التنبيه فقط.',
           ),
