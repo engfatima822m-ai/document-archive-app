@@ -1,3 +1,4 @@
+
 import 'package:flutter/material.dart';
 import 'package:flutter_localizations/flutter_localizations.dart';
 
@@ -82,7 +83,7 @@ class AppFooter extends StatelessWidget {
             ),
           ),
           child: const Text(
-            ' Designed and Developed by Eng. Fatima Zayaan     |  © 2026',
+            ' شعبة تقنية المعلومات / وحدة البرمجة — تصميم وتطوير المهندسة فاطمة زعيان | © 2026',
             textAlign: TextAlign.center,
             maxLines: 1,
             overflow: TextOverflow.ellipsis,
