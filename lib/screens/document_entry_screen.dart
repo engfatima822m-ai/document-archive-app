@@ -319,6 +319,27 @@ class _DocumentEntryScreenState
         return;
       }
 
+      // Refresh cached images when the scanner reuses the same file paths.
+      final pathsToRefresh = <String>{
+        ...sourceImagePaths,
+        ...files.map((file) => file.path),
+      };
+
+      for (final path in pathsToRefresh) {
+        await FileImage(File(path)).evict();
+      }
+
+      if (!mounted) return;
+
+      setState(() {
+        sourceImagePaths = [];
+        previewIndex = 0;
+      });
+
+      await WidgetsBinding.instance.endOfFrame;
+
+      if (!mounted) return;
+
       setState(() {
         sourceImagePaths = files
             .map((file) => file.path)
