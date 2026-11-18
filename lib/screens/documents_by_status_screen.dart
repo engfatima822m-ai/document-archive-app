@@ -1,8 +1,8 @@
 import 'package:flutter/material.dart';
-import 'package:printing/printing.dart';
 
 import '../models/document_model.dart';
 import '../services/api_service.dart';
+import '../services/print_service.dart';
 
 class DocumentsByStatusScreen
     extends StatefulWidget {
@@ -226,7 +226,7 @@ class _DocumentsByStatusScreenState
     }
   }
 
-  Future<void> openPdf(
+  Future<void> printPdf(
     DocumentModel document,
   ) async {
     if (!document.hasPdf) {
@@ -252,10 +252,11 @@ class _DocumentsByStatusScreenState
         recordType: 'main',
       );
 
-      await Printing.layoutPdf(
-        name:
-            '${document.documentNumber}.pdf',
-        onLayout: (_) async => bytes,
+      if (!mounted) return;
+      await PrintService.printPdf(
+        context,
+        bytes: bytes,
+        name: '${document.documentNumber}.pdf',
       );
     } on ApiException catch (exception) {
       showMessage(
@@ -264,7 +265,7 @@ class _DocumentsByStatusScreenState
       );
     } catch (exception) {
       showMessage(
-        'تعذر فتح PDF: $exception',
+        'تعذر تنفيذ الطباعة: $exception',
         isError: true,
       );
     }
@@ -347,14 +348,14 @@ class _DocumentsByStatusScreenState
                         dialogContext,
                       ).pop();
 
-                      openPdf(document);
+                      printPdf(document);
                     }
                   : null,
               icon: const Icon(
                 Icons.picture_as_pdf,
               ),
               label: const Text(
-                'عرض أو طباعة PDF',
+                'طباعة PDF',
               ),
             ),
           ],
@@ -492,9 +493,9 @@ class _DocumentsByStatusScreenState
           ),
         ),
         trailing: IconButton(
-          tooltip: 'عرض أو طباعة PDF',
+          tooltip: 'طباعة PDF',
           onPressed: document.hasPdf
-              ? () => openPdf(document)
+              ? () => printPdf(document)
               : null,
           icon: Icon(
             Icons.picture_as_pdf,

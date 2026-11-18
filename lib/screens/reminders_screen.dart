@@ -1,9 +1,9 @@
 import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
-import 'package:printing/printing.dart';
 
 import '../services/api_service.dart';
+import '../services/print_service.dart';
 
 class RemindersScreen extends StatefulWidget {
   const RemindersScreen({super.key});
@@ -150,9 +150,11 @@ class _RemindersScreenState
         recordType: reminder.recordType,
       );
 
-      await Printing.layoutPdf(
+      if (!mounted) return;
+      await PrintService.printPdf(
+        context,
+        bytes: pdfBytes,
         name: '${reminder.documentNumber}.pdf',
-        onLayout: (_) async => pdfBytes,
       );
     } on ApiException catch (error) {
       _showMessage(
@@ -161,7 +163,7 @@ class _RemindersScreenState
       );
     } catch (_) {
       _showMessage(
-        'تعذر فتح ملف PDF.',
+        'تعذر تنفيذ الطباعة.',
         isError: true,
       );
     } finally {
@@ -362,7 +364,7 @@ class _RemindersScreenState
                 icon: const Icon(
                   Icons.picture_as_pdf,
                 ),
-                label: const Text('فتح PDF'),
+                label: const Text('طباعة PDF'),
               ),
           ],
         );
@@ -840,7 +842,7 @@ class _RemindersScreenState
                             .picture_as_pdf_outlined,
                       ),
                       label: const Text(
-                        'فتح PDF',
+                        'طباعة PDF',
                       ),
                     ),
                   FilledButton.tonalIcon(

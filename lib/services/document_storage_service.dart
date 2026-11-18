@@ -250,6 +250,7 @@ class DocumentStorageService {
   static String
       buildAttachmentRelativeFolder({
     required int parentDocumentId,
+    required String parentDocumentNumber,
     required String subDocumentNumber,
     required String subDocumentDate,
   }) {
@@ -262,17 +263,23 @@ class DocumentStorageService {
     final number = safePathPart(
       subDocumentNumber,
       fallback: 'attachment',
-      maximumLength: 60,
+      maximumLength: 12,
     );
 
     final uniqueId =
         generateBatchId();
 
+    final parentNumber = safePathPart(
+      parentDocumentNumber,
+      fallback: 'بدون رقم',
+      maximumLength: 20,
+    );
+
     return 'attachments/'
-        '$parentDocumentId/'
+        'كتاب رئيسي $parentNumber ($parentDocumentId)/'
         '$year/'
         '$month/'
-        'attachment_${number}_$uniqueId';
+        'تابع ${number}_$uniqueId';
   }
 
   static String buildPdfFileName({
@@ -788,6 +795,7 @@ class DocumentStorageService {
         buildAttachmentRelativeFolder(
       parentDocumentId:
           parentDocumentId,
+      parentDocumentNumber: parentDocumentNumber ?? '',
       subDocumentNumber:
           subDocumentNumber,
       subDocumentDate:

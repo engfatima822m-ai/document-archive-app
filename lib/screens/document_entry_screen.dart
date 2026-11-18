@@ -1,11 +1,15 @@
+import 'dart:async';
 import 'dart:io';
 
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
+import 'package:path/path.dart' as p;
+import 'package:printing/printing.dart';
 
 import '../models/document_model.dart';
 import '../services/api_service.dart';
 import '../services/document_storage_service.dart';
+import '../services/scan_batch.dart';
 import 'document_search_screen.dart';
 import 'documents_by_status_screen.dart';
 import 'login_screen.dart';
@@ -80,6 +84,10 @@ class _DocumentEntryScreenState
   bool isSaving = false;
   bool isLookingForParent = false;
   bool isImporting = false;
+  bool isOpeningScanner = false;
+
+  ScanBatch? scanBaseline;
+  Directory? _importedPdfPages;
 
   String selectedStatus = 'قيد الإنجاز';
 
@@ -118,6 +126,7 @@ class _DocumentEntryScreenState
 
     _disposeBatchForms();
 
+    _releaseImportedPdfPages();
     super.dispose();
   }
 
@@ -232,88 +241,108 @@ class _DocumentEntryScreenState
     }
   }
 
-  Future<void> _pickImages() async {
-    if (isSaving) return;
+  Future<void> _deleteImportedPdfPages(Directory? directory) async {
+    try {
+      if (directory == null) return;
+      await for (final page in directory.list(followLinks: false)) {
+        await page.delete();
+      }
+      await directory.delete();
+    } on FileSystemException catch (error) {
+      debugPrint('تعذر تنظيف صفحات PDF المؤقتة: $error');
+    }
+  }
 
-    final result =
-        await FilePicker.platform.pickFiles(
-      dialogTitle:
-          'اختار صور المستند بالترتيب',
-      allowMultiple: true,
-      type: FileType.custom,
-      allowedExtensions: const [
-        'jpg',
-        'jpeg',
-        'png',
-      ],
-    );
+  void _releaseImportedPdfPages() {
+    final directory = _importedPdfPages;
+    _importedPdfPages = null;
+    unawaited(_deleteImportedPdfPages(directory));
+  }
 
-    if (result == null) return;
+  Future<void> _pickFiles() async {
+    if (isSaving || isImporting || isOpeningScanner) return;
 
-    final paths = result.files
-        .map((file) => file.path)
-        .whereType<String>()
-        .where((path) => path.trim().isNotEmpty)
-        .toList();
+    setState(() => isImporting = true);
+    Directory? pendingPages;
+    try {
+      final result = await FilePicker.platform.pickFiles(
+        dialogTitle: 'اختيار صور أو ملفات PDF',
+        allowMultiple: true,
+        type: FileType.custom,
+        allowedExtensions: const ['jpg', 'jpeg', 'png', 'pdf'],
+      );
+      if (!mounted || result == null) return;
 
-    if (paths.isEmpty) {
+      final paths = <String>[];
+      var pageIndex = 0;
+      for (final path in result.paths.whereType<String>()) {
+        if (p.extension(path).toLowerCase() != '.pdf') {
+          paths.add(path);
+          continue;
+        }
+
+        pendingPages ??= await Directory.systemTemp.createTemp('archive_pdf_');
+        final bytes = await File(path).readAsBytes();
+        final firstPageIndex = pageIndex;
+        await for (final page in Printing.raster(bytes, dpi: 200)) {
+          if (!mounted) return;
+          final image = File(p.join(pendingPages.path, '${pageIndex++}.png'));
+          await image.writeAsBytes(await page.toPng());
+          paths.add(image.path);
+        }
+        if (pageIndex == firstPageIndex) {
+          throw FormatException('تعذر قراءة صفحات ${p.basename(path)}.');
+        }
+      }
+      if (!mounted) return;
+      if (paths.isEmpty) {
+        _showMessage('لم يتم اختيار ملفات صالحة.', isError: true);
+        return;
+      }
+
+      _releaseImportedPdfPages();
+      _importedPdfPages = pendingPages;
+      pendingPages = null;
+      _disposeBatchForms();
+      setState(() {
+        sourceImagePaths = paths;
+        previewIndex = 0;
+      });
+      _syncBatchForms();
+    } catch (error) {
+      if (mounted) {
+        _showMessage('تعذر استيراد الملفات: $error', isError: true);
+      }
+    } finally {
+      await _deleteImportedPdfPages(pendingPages);
+      if (mounted) setState(() => isImporting = false);
+    }
+  }
+
+  Future<void> _importFromTemporaryFolder() async {
+    if (isImporting || isSaving || isOpeningScanner) return;
+
+    final baseline = scanBaseline;
+    if (baseline == null) {
       _showMessage(
-        'لم يتم اختيار صور صالحة.',
+        'اضغط فتح جهاز الأرشفة قبل سحب كتاب جديد.',
         isError: true,
       );
       return;
     }
 
     setState(() {
-      sourceImagePaths = paths;
-      previewIndex = 0;
-    });
-
-    _syncBatchForms();
-  }
-
-  Future<void> _importFromTemporaryFolder() async {
-    if (isImporting || isSaving) return;
-
-    setState(() {
       isImporting = true;
     });
 
     try {
-      final directory = Directory(
-        DocumentStorageService
-            .scanTemporaryPath,
-      );
+      final paths = await baseline.changedImages();
 
-      if (!await directory.exists()) {
-        await directory.create(
-          recursive: true,
-        );
-      }
+      if (!mounted) return;
 
-      final files = await directory
-          .list()
-          .where((entity) => entity is File)
-          .cast<File>()
-          .where((file) {
-        final lower = file.path.toLowerCase();
-
-        return lower.endsWith('.jpg') ||
-            lower.endsWith('.jpeg') ||
-            lower.endsWith('.png');
-      }).toList();
-
-      files.sort(
-        (first, second) => first.path
-            .toLowerCase()
-            .compareTo(
-              second.path.toLowerCase(),
-            ),
-      );
-
-      if (files.isEmpty) {
+      if (paths.isEmpty) {
         _showMessage(
-          'لا توجد صور داخل مجلد السحب المؤقت.',
+          'لا توجد صور جديدة. اضغط Finish في برنامج السحب ثم أعد الاستيراد.',
           isError: true,
         );
         return;
@@ -322,7 +351,7 @@ class _DocumentEntryScreenState
       // Refresh cached images when the scanner reuses the same file paths.
       final pathsToRefresh = <String>{
         ...sourceImagePaths,
-        ...files.map((file) => file.path),
+        ...paths,
       };
 
       for (final path in pathsToRefresh) {
@@ -341,17 +370,17 @@ class _DocumentEntryScreenState
       if (!mounted) return;
 
       setState(() {
-        sourceImagePaths = files
-            .map((file) => file.path)
-            .toList();
-
+        scanBaseline = null;
+        _releaseImportedPdfPages();
+        sourceImagePaths = paths;
         previewIndex = 0;
       });
 
+      _disposeBatchForms();
       _syncBatchForms();
 
       _showMessage(
-        'تم استيراد ${files.length} صفحة.',
+        'تم استيراد ${paths.length} صفحة من السحب الحالي.',
       );
     } catch (exception) {
       _showMessage(
@@ -368,6 +397,12 @@ class _DocumentEntryScreenState
   }
 
   Future<void> _openCaptureOnTouch() async {
+    if (isSaving || isImporting || isOpeningScanner) return;
+
+    setState(() {
+      isOpeningScanner = true;
+    });
+
     try {
       final executable =
           File(captureOnTouchPath);
@@ -381,12 +416,27 @@ class _DocumentEntryScreenState
         return;
       }
 
+      final batch = await ScanBatch.start(
+        Directory(DocumentStorageService.scanTemporaryPath),
+      );
+      if (!mounted) return;
+
       await Process.start(
         captureOnTouchPath,
         const [],
         mode: ProcessStartMode.detached,
         runInShell: true,
       );
+
+      if (!mounted) return;
+
+      _disposeBatchForms();
+      setState(() {
+        scanBaseline = batch;
+        _releaseImportedPdfPages();
+        sourceImagePaths = [];
+        previewIndex = 0;
+      });
 
       _showMessage(
         'تم فتح برنامج جهاز الأرشفة. '
@@ -397,6 +447,12 @@ class _DocumentEntryScreenState
         'تعذر فتح CaptureOnTouch: $exception',
         isError: true,
       );
+    } finally {
+      if (mounted) {
+        setState(() {
+          isOpeningScanner = false;
+        });
+      }
     }
   }
 
@@ -477,6 +533,7 @@ class _DocumentEntryScreenState
   }
 
   Future<void> _findParentDocument() async {
+    if (isSaving || isLookingForParent) return;
     final number =
         parentNumberController.text.trim();
 
@@ -699,7 +756,7 @@ class _DocumentEntryScreenState
   }
 
   Future<void> _save() async {
-    if (isSaving) return;
+    if (isSaving || isImporting || isOpeningScanner) return;
 
     if (sourceImagePaths.isEmpty) {
       _showMessage(
@@ -737,16 +794,13 @@ class _DocumentEntryScreenState
 
     try {
       if (isAttachment) {
+        final parent = selectedParent!;
         await DocumentStorageService
             .saveAttachmentFromImages(
           parentDocumentId:
-              selectedParent!.id!,
-          parentDocumentNumber:
-              selectedParent!
-                  .documentNumber,
-          parentDocumentTitle:
-              selectedParent!
-                  .documentTitle,
+              parent.id!,
+          parentDocumentNumber: parent.documentNumber,
+          parentDocumentTitle: parent.documentTitle,
           subDocumentNumber:
               documentNumberController
                   .text
@@ -784,7 +838,7 @@ class _DocumentEntryScreenState
         );
 
         _showMessage(
-          'تم حفظ الكتاب التابع كملف PDF.',
+          'تم حفظ الكتاب التابع ضمن الكتاب الرئيسي رقم ${parent.documentNumber}.',
         );
       } else {
         await DocumentStorageService
@@ -1015,6 +1069,8 @@ class _DocumentEntryScreenState
   }
 
   void _resetForm() {
+    if (!mounted) return;
+    _releaseImportedPdfPages();
     documentNumberController.clear();
     documentTitleController.clear();
     notesController.clear();
@@ -1029,11 +1085,20 @@ class _DocumentEntryScreenState
     setState(() {
       sourceImagePaths = [];
       previewIndex = 0;
+      scanBaseline = null;
       selectedParent = null;
       parentNumberController.clear();
       separateEachPage = false;
       selectedStatus = 'قيد الإنجاز';
     });
+  }
+
+  void _refreshEntry() {
+    FocusScope.of(context).unfocus();
+    formKey.currentState?.reset();
+    _resetForm();
+    setState(() => isAttachment = false);
+    _showMessage('تم بدء جلسة أرشفة جديدة.');
   }
 
   Future<void> _logout() async {
@@ -1159,10 +1224,15 @@ class _DocumentEntryScreenState
                 child: TextField(
                   controller:
                       parentNumberController,
+                  enabled: !isLookingForParent && !isSaving,
+                  onChanged: (_) {
+                    if (selectedParent != null) {
+                      setState(() => selectedParent = null);
+                    }
+                  },
                   decoration:
                       _inputDecoration(
-                    label:
-                        'رقم الملف الأصلي',
+                    label: 'رقم الكتاب الرئيسي',
                     icon: Icons.search,
                   ),
                   onSubmitted: (_) =>
@@ -1172,7 +1242,7 @@ class _DocumentEntryScreenState
               const SizedBox(width: 10),
               FilledButton.icon(
                 onPressed:
-                    isLookingForParent
+                    isLookingForParent || isSaving
                         ? null
                         : _findParentDocument,
                 icon: isLookingForParent
@@ -1188,7 +1258,7 @@ class _DocumentEntryScreenState
                         Icons.manage_search,
                       ),
                 label:
-                    const Text('بحث'),
+                    const Text('بحث عن الرئيسي'),
               ),
             ],
           ),
@@ -1204,8 +1274,8 @@ class _DocumentEntryScreenState
                     .documentTitle,
               ),
               subtitle: Text(
-                'رقم الملف: '
-                '${selectedParent!.documentNumber}',
+                'سيُحفظ التابع تحت هذا الكتاب الرئيسي '
+                'رقم ${selectedParent!.documentNumber} · ${selectedParent!.documentDate}',
               ),
             ),
           ],
@@ -1219,9 +1289,20 @@ class _DocumentEntryScreenState
       key: formKey,
       child: Column(
         children: [
-          _buildParentSelector(),
-          if (isAttachment)
+          if (isAttachment) ...[
+            const Align(
+              alignment: AlignmentDirectional.centerStart,
+              child: Text('١. ابحث عن الكتاب الرئيسي واختره'),
+            ),
+            const SizedBox(height: 8),
+            _buildParentSelector(),
             const SizedBox(height: 14),
+            const Align(
+              alignment: AlignmentDirectional.centerStart,
+              child: Text('٢. أدخل بيانات الكتاب التابع وأضف صفحاته'),
+            ),
+            const SizedBox(height: 8),
+          ],
           TextFormField(
             controller:
                 documentNumberController,
@@ -1507,7 +1588,7 @@ class _DocumentEntryScreenState
               height: 52,
               child: FilledButton.icon(
                 onPressed:
-                    isSaving ? null : _save,
+                    isSaving || isImporting || isOpeningScanner ? null : _save,
                 style: FilledButton.styleFrom(
                   backgroundColor:
                       const Color(0xFF24528A),
@@ -1528,7 +1609,9 @@ class _DocumentEntryScreenState
                 label: Text(
                   isSaving
                       ? 'جاري الحفظ...'
-                      : 'حفظ في الأرشيف',
+                      : isAttachment
+                          ? 'حفظ الكتاب التابع'
+                          : 'حفظ في الأرشيف',
                   style:
                       const TextStyle(
                     fontSize: 16,
@@ -1578,7 +1661,7 @@ class _DocumentEntryScreenState
               runSpacing: 10,
               children: [
                 FilledButton.icon(
-                  onPressed: isSaving
+                  onPressed: isSaving || isImporting || isOpeningScanner
                       ? null
                       : _openCaptureOnTouch,
                   icon: const Icon(
@@ -1590,7 +1673,8 @@ class _DocumentEntryScreenState
                 ),
                 OutlinedButton.icon(
                   onPressed: isSaving ||
-                          isImporting
+                          isImporting ||
+                          isOpeningScanner
                       ? null
                       : _importFromTemporaryFolder,
                   icon: isImporting
@@ -1610,13 +1694,14 @@ class _DocumentEntryScreenState
                   ),
                 ),
                 OutlinedButton.icon(
-                  onPressed:
-                      isSaving ? null : _pickImages,
+                  onPressed: isSaving || isImporting || isOpeningScanner
+                      ? null
+                      : _pickFiles,
                   icon: const Icon(
                     Icons.folder_open,
                   ),
                   label: const Text(
-                    'اختيار صور',
+                    'اختيار صور أو PDF',
                   ),
                 ),
               ],
@@ -1856,6 +1941,14 @@ class _DocumentEntryScreenState
             const Color(0xFF173A64),
         foregroundColor: Colors.white,
         actions: [
+          IconButton(
+            tooltip: 'تحديث وبدء أرشفة جديدة',
+            onPressed: isSaving || isImporting || isOpeningScanner ||
+                    isLookingForParent
+                ? null
+                : _refreshEntry,
+            icon: const Icon(Icons.refresh),
+          ),
           IconButton(
             tooltip: 'البحث',
             onPressed: () {

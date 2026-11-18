@@ -6,6 +6,7 @@ import 'package:printing/printing.dart';
 import '../models/attachment_model.dart';
 import '../models/document_model.dart';
 import '../services/api_service.dart';
+import '../services/print_service.dart';
 
 class SearchGroup {
   final DocumentModel parent;
@@ -74,9 +75,9 @@ class _DocumentSearchScreenState
     final query =
         searchController.text.trim();
 
-    if (query.length < 2) {
+    if (query.isEmpty) {
       showMessage(
-        'اكتب حرفين على الأقل للبحث.',
+        'اكتب عبارة للبحث.',
         isError: true,
       );
       return;
@@ -288,31 +289,13 @@ class _DocumentSearchScreenState
     }
 
     try {
-      final selectedPrinter =
-          await Printing.pickPrinter(
-        context: context,
-        title: 'اختيار الطابعة',
-      );
-
-      if (selectedPrinter == null) {
-        return;
-      }
-
-      final printed =
-          await Printing.directPrintPdf(
-        printer: selectedPrinter,
+      await PrintService.printPdf(
+        context,
+        bytes: bytes,
         name: selectedPdfTitle.isEmpty
             ? 'archive_document.pdf'
             : '$selectedPdfTitle.pdf',
-        onLayout: (_) async => bytes,
       );
-
-      if (!printed) {
-        showMessage(
-          'لم تكتمل عملية الطباعة.',
-          isError: true,
-        );
-      }
     } catch (exception) {
       showMessage(
         'تعذر تنفيذ الطباعة: $exception',
